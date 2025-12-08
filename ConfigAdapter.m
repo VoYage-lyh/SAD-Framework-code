@@ -56,7 +56,7 @@ function [analysis_params, sim_params] = ConfigAdapter(preConfig, identifiedPara
     sim_params.trunk = buildTrunkParams(preConfig, identifiedParams);
     
     % 分枝参数（几何+质量，刚度阻尼待填充）
-    sim_params.predefined_params = buildAllBranchParams(preConfig, identifiedParams);
+    sim_params.predefined_params = generatePredefinedParams(preConfig, identifiedParams);
     
     % 果实参数
     % 构建果实配置，确保包含所有必需字段
@@ -123,234 +123,127 @@ end
 
 %% ==================== 构建主干参数 ====================
 function trunk = buildTrunkParams(preConfig, identifiedParams)
+    % 构建主干参数 - 严格模式
+    % 所有刚度阻尼必须从识别结果获取，无数据则报错
+    
     trunk = struct();
     
-    % 几何参数
+    % ===== 几何参数（从预配置获取）=====
+    if ~isfield(preConfig, 'trunk')
+        error('ConfigAdapter:MissingData', '预配置缺少主干参数(trunk)');
+    end
+    
+    required_geom_fields = {'length', 'diameter_base', 'diameter_tip', 'z_factor', 'total_mass', 'mass_distribution'};
+    for i = 1:length(required_geom_fields)
+        if ~isfield(preConfig.trunk, required_geom_fields{i})
+            error('ConfigAdapter:MissingData', '主干配置缺少字段: %s', required_geom_fields{i});
+        end
+    end
+    
     trunk.length = preConfig.trunk.length;
     trunk.diameter_base = preConfig.trunk.diameter_base;
     trunk.diameter_tip = preConfig.trunk.diameter_tip;
     trunk.z_factor = preConfig.trunk.z_factor;
     
-    % 质量参数
+    % ===== 质量参数（从预配置获取）=====
     m_total = preConfig.trunk.total_mass;
     m_dist = preConfig.trunk.mass_distribution;
+    
+    if length(m_dist) ~= 3
+        error('ConfigAdapter:InvalidData', '主干质量分配必须是长度为3的向量 [root, mid, tip]');
+    end
+    if abs(sum(m_dist) - 1) > 0.01
+        error('ConfigAdapter:InvalidData', '主干质量分配之和必须为1，当前为%.4f', sum(m_dist));
+    end
     
     trunk.root.m = m_total * m_dist(1);
     trunk.mid.m = m_total * m_dist(2);
     trunk.tip.m = m_total * m_dist(3);
     
-    % 刚度和阻尼参数
-    if ~isempty(identifiedParams) && isfield(identifiedParams, 'linear')
-        % 使用识别结果
-        K = identifiedParams.linear.K;
-        C = identifiedParams.linear.C;
-        
-        % 提取对角元素作为各节点的连接刚度/阻尼
-        if size(K, 1) >= 3
-            trunk.root.k_y_conn_to_base = K(1,1);
-            trunk.root.k_y_conn = K(1,1) * 0.8;
-            trunk.mid.k_y_conn = K(2,2);
-            trunk.tip.k_y_conn = K(3,3);
-            
-            trunk.root.c_y_conn_to_base = C(1,1);
-            trunk.root.c_y_conn = C(1,1) * 0.8;
-            trunk.mid.c_y_conn = C(2,2);
-            trunk.tip.c_y_conn = C(3,3);
-            
-            % Z方向（应用z_factor）
-            z_factor = trunk.z_factor;
-            trunk.root.k_z_conn_to_base = K(1,1) * z_factor;
-            trunk.root.k_z_conn = K(1,1) * 0.8 * z_factor;
-            trunk.mid.k_z_conn = K(2,2) * z_factor;
-            trunk.tip.k_z_conn = K(3,3) * z_factor;
-            
-            trunk.root.c_z_conn_to_base = C(1,1) * z_factor;
-            trunk.root.c_z_conn = C(1,1) * 0.8 * z_factor;
-            trunk.mid.c_z_conn = C(2,2) * z_factor;
-            trunk.tip.c_z_conn = C(3,3) * z_factor;
-        end
-    else
-        % 使用基于几何的估算值
-        [k_est, c_est] = estimateStiffnessDamping(preConfig.trunk);
-        
-        z_factor = trunk.z_factor;
-        
-        trunk.root.k_y_conn_to_base = k_est;
-        trunk.root.c_y_conn_to_base = c_est;
-        trunk.root.k_z_conn_to_base = k_est * z_factor;
-        trunk.root.c_z_conn_to_base = c_est * z_factor;
-        
-        trunk.root.k_y_conn = k_est * 0.8;
-        trunk.root.c_y_conn = c_est * 0.8;
-        trunk.root.k_z_conn = k_est * 0.8 * z_factor;
-        trunk.root.c_z_conn = c_est * 0.8 * z_factor;
-        
-        trunk.mid.k_y_conn = k_est * 0.5;
-        trunk.mid.c_y_conn = c_est * 0.8;
-        trunk.mid.k_z_conn = k_est * 0.5 * z_factor;
-        trunk.mid.c_z_conn = c_est * 0.8 * z_factor;
-        
-        trunk.tip.k_y_conn = k_est * 0.2;
-        trunk.tip.c_y_conn = c_est * 0.8;
-        trunk.tip.k_z_conn = k_est * 0.2 * z_factor;
-        trunk.tip.c_z_conn = c_est * 0.8 * z_factor;
-    end
-end
-
-%% ==================== 构建所有分枝参数 ====================
-function predefined = buildAllBranchParams(preConfig, identifiedParams)
-    % 构建所有分枝的物理参数（root, mid, tip 段）
-    % 输入:
-    %   preConfig - 来自GUI的预配置（包含primary, secondary, tertiary几何参数）
-    %   identifiedParams - 识别的参数（可选，用于更新刚度阻尼）
-    % 输出:
-    %   predefined - 包含所有分枝段参数的结构体
-    
-    predefined = struct();
-    
-    % --- 处理一级分枝 ---
-    if isfield(preConfig, 'primary') && isstruct(preConfig.primary)
-        pFields = fieldnames(preConfig.primary);
-        for i = 1:length(pFields)
-            name = pFields{i};
-            b = preConfig.primary.(name);
-            
-            % 基于几何估算刚度阻尼
-            [k_base, c_base] = estimateStiffnessDamping(b, identifiedParams);
-            
-            % 如果有识别参数，尝试使用识别值
-            if ~isempty(identifiedParams) && isfield(identifiedParams, 'branches')
-                if isfield(identifiedParams.branches, name)
-                    k_base = identifiedParams.branches.(name).k_base;
-                    c_base = identifiedParams.branches.(name).c_base;
-                end
-            end
-            
-            % 生成分枝段参数
-            predefined.(name) = generateBranchSegmentParams(b, k_base, c_base);
-            predefined.(name).branch_level = 1;
-        end
+    % ===== 刚度和阻尼参数（必须从识别结果获取）=====
+    if isempty(identifiedParams)
+        error('ConfigAdapter:MissingData', ...
+              '缺少参数识别结果(identifiedParams)，请先运行参数识别程序');
     end
     
-    % --- 处理二级分枝 ---
-    if isfield(preConfig, 'secondary') && isstruct(preConfig.secondary)
-        sFields = fieldnames(preConfig.secondary);
-        for i = 1:length(sFields)
-            name = sFields{i};
-            b = preConfig.secondary.(name);
-            
-            [k_base, c_base] = estimateStiffnessDamping(b, identifiedParams);
-            
-            if ~isempty(identifiedParams) && isfield(identifiedParams, 'branches')
-                if isfield(identifiedParams.branches, name)
-                    k_base = identifiedParams.branches.(name).k_base;
-                    c_base = identifiedParams.branches.(name).c_base;
-                end
-            end
-            
-            predefined.(name) = generateBranchSegmentParams(b, k_base, c_base);
-            predefined.(name).branch_level = 2;
-
-            % 为二级分枝添加果实附着信息
-            if shouldAttachAtPosition(2, 'mid', preConfig.fruit)
-                predefined.(name).fruit_at_mid = buildFruitParamsForBranch(preConfig, identifiedParams);
-            end
-            if shouldAttachAtPosition(2, 'tip', preConfig.fruit)
-                predefined.(name).fruit_at_tip = buildFruitParamsForBranch(preConfig, identifiedParams);
-            end
-        end
+    if ~isfield(identifiedParams, 'linear')
+        error('ConfigAdapter:MissingData', ...
+              '识别参数缺少linear字段，请检查参数识别是否成功完成');
     end
     
-    % --- 处理三级分枝 ---
-    if isfield(preConfig, 'tertiary') && isstruct(preConfig.tertiary)
-        tFields = fieldnames(preConfig.tertiary);
-        for i = 1:length(tFields)
-            name = tFields{i};
-            b = preConfig.tertiary.(name);
-            
-            [k_base, c_base] = estimateStiffnessDamping(b, identifiedParams);
-            
-            if ~isempty(identifiedParams) && isfield(identifiedParams, 'branches')
-                if isfield(identifiedParams.branches, name)
-                    k_base = identifiedParams.branches.(name).k_base;
-                    c_base = identifiedParams.branches.(name).c_base;
-                end
-            end
-            
-            predefined.(name) = generateBranchSegmentParams(b, k_base, c_base);
-            predefined.(name).branch_level = 3;
-
-            % 【新增】为三级分枝添加果实附着信息
-            if shouldAttachAtPosition(3, 'mid', preConfig.fruit)
-                predefined.(name).fruit_at_mid = buildFruitParamsForBranch(preConfig, identifiedParams);
-            end
-            if shouldAttachAtPosition(3, 'tip', preConfig.fruit)
-                predefined.(name).fruit_at_tip = buildFruitParamsForBranch(preConfig, identifiedParams);
-            end
-        end
+    linear = identifiedParams.linear;
+    
+    % 验证识别的刚度阻尼矩阵
+    if ~isfield(linear, 'K') || ~isfield(linear, 'C')
+        error('ConfigAdapter:MissingData', ...
+              '识别参数缺少刚度矩阵(K)或阻尼矩阵(C)');
     end
     
-    % 验证生成的参数
-    validatePredefinedParams(predefined, preConfig);
-end
-
-%% ==================== 验证预定义参数完整性 ====================
-function validatePredefinedParams(predefined, preConfig)
-    % 验证所有必需的分枝参数是否都已生成
+    K = linear.K;
+    C = linear.C;
     
-    missingBranches = {};
-    
-    % 检查一级分枝
-    num_p = preConfig.topology.num_primary_branches;
-    for p = 1:num_p
-        branch_id = sprintf('P%d', p);
-        if ~isfield(predefined, branch_id)
-            missingBranches{end+1} = branch_id;
-        end
+    if size(K, 1) < 3 || size(C, 1) < 3
+        error('ConfigAdapter:InvalidData', ...
+              '识别的刚度阻尼矩阵维度不足，需要至少3x3（对应Root/Mid/Tip三个节点）');
     end
     
-    % 检查二级分枝
-    for p = 1:num_p
-        num_s = preConfig.topology.secondary_branches_count(p);
-        for s = 1:num_s
-            branch_id = sprintf('P%d_S%d', p, s);
-            if ~isfield(predefined, branch_id)
-                missingBranches{end+1} = branch_id;
-            end
-        end
+    % 验证递减因子
+    if ~isfield(linear, 'taper_factors')
+        error('ConfigAdapter:MissingData', ...
+              '识别参数缺少递减因子(taper_factors)，请确保参数识别程序计算了递减因子');
     end
     
-    % 检查三级分枝
-    for p = 1:num_p
-        if p <= length(preConfig.topology.tertiary_branches_count)
-            tertiary_for_p = preConfig.topology.tertiary_branches_count{p};
-            num_s = preConfig.topology.secondary_branches_count(p);
-            for s = 1:num_s
-                if s <= length(tertiary_for_p)
-                    num_t = tertiary_for_p(s);
-                    for t = 1:num_t
-                        branch_id = sprintf('P%d_S%d_T%d', p, s, t);
-                        if ~isfield(predefined, branch_id)
-                            missingBranches{end+1} = branch_id;
-                        end
-                    end
-                end
-            end
-        end
+    taper = linear.taper_factors;
+    if ~isfield(taper, 'k') || ~isfield(taper, 'c')
+        error('ConfigAdapter:MissingData', '递减因子缺少k或c字段');
+    end
+    if length(taper.k) ~= 3 || length(taper.c) ~= 3
+        error('ConfigAdapter:InvalidData', '递减因子必须是长度为3的向量');
     end
     
-    % 报告缺失的分枝
-    if ~isempty(missingBranches)
-        warning('ConfigAdapter:MissingBranches', ...
-                '以下分枝在预配置中缺少几何参数，将使用默认值:\n  %s', ...
-                strjoin(missingBranches, ', '));
-        
-        % 为缺失的分枝生成默认参数
-        for i = 1:length(missingBranches)
-            branch_id = missingBranches{i};
-            predefined.(branch_id) = generateDefaultBranchSegment(branch_id);
-        end
-    end
+    k_taper = taper.k;  % 从实验计算的刚度递减因子 [root, mid, tip]
+    c_taper = taper.c;  % 从实验计算的阻尼递减因子 [root, mid, tip]
+    
+    z_factor = trunk.z_factor;
+    
+    % 提取基础刚度阻尼（使用对角线元素的最大值作为基准）
+    k_base = max(diag(K));
+    c_base = max(diag(C));
+    
+    fprintf('  主干参数: k_base=%.2f N/m, c_base=%.4f Ns/m (从实验识别)\n', k_base, c_base);
+    fprintf('  递减因子: k=[%.3f, %.3f, %.3f], c=[%.3f, %.3f, %.3f] (从实验计算)\n', ...
+            k_taper(1), k_taper(2), k_taper(3), c_taper(1), c_taper(2), c_taper(3));
+    
+    % ===== Root段参数 =====
+    % 连接到地面的刚度阻尼（使用识别的K(1,1)和C(1,1)）
+    trunk.root.k_y_conn_to_base = K(1,1);
+    trunk.root.c_y_conn_to_base = C(1,1);
+    trunk.root.k_z_conn_to_base = K(1,1) * z_factor;
+    trunk.root.c_z_conn_to_base = C(1,1) * z_factor;
+    
+    % Root到Mid的内部连接（使用基础值乘以递减因子）
+    trunk.root.k_y_conn = k_base * k_taper(1);
+    trunk.root.c_y_conn = c_base * c_taper(1);
+    trunk.root.k_z_conn = k_base * k_taper(1) * z_factor;
+    trunk.root.c_z_conn = c_base * c_taper(1) * z_factor;
+    
+    % ===== Mid段参数 =====
+    trunk.mid.k_y_conn = k_base * k_taper(2);
+    trunk.mid.c_y_conn = c_base * c_taper(2);
+    trunk.mid.k_z_conn = k_base * k_taper(2) * z_factor;
+    trunk.mid.c_z_conn = c_base * c_taper(2) * z_factor;
+    
+    % ===== Tip段参数 =====
+    trunk.tip.k_y_conn = k_base * k_taper(3);
+    trunk.tip.c_y_conn = c_base * c_taper(3);
+    trunk.tip.k_z_conn = k_base * k_taper(3) * z_factor;
+    trunk.tip.c_z_conn = c_base * c_taper(3) * z_factor;
+    
+    % 保存使用的递减因子（便于调试）
+    trunk.taper_factors.k = k_taper;
+    trunk.taper_factors.c = c_taper;
+    
+    fprintf('  主干参数构建完成（严格模式）\n');
 end
 
 %% ==================== 为分枝生成默认段参数 ====================
@@ -819,50 +712,6 @@ function attach = shouldAttachAtPosition(level, position, fruitConfig)
     else
         attach = false;
     end
-end
-
-function fruitParams = buildFruitParamsForBranch(preConfig, identifiedParams)
-    % 为单个分枝位置构建果实参数结构体
-    % 使用统一的字段命名: fruit_at_mid, fruit_at_tip
-    
-    fruitParams = struct();
-    
-    % 基础物理参数从预配置读取
-    fruitParams.m = preConfig.fruit.mass;
-    
-    % 果柄刚度和阻尼 - 优先使用识别值
-    if ~isempty(identifiedParams) && isfield(identifiedParams, 'fruit_pedicel')
-        fruitParams.k_pedicel_y = identifiedParams.fruit_pedicel.k_y;
-        fruitParams.c_pedicel_y = identifiedParams.fruit_pedicel.c_y;
-        fruitParams.k_pedicel_z = identifiedParams.fruit_pedicel.k_z;
-        fruitParams.c_pedicel_z = identifiedParams.fruit_pedicel.c_z;
-    else
-        % 基于果柄几何估算刚度
-        L_ped = preConfig.fruit.pedicel_length;
-        D_ped = preConfig.fruit.pedicel_diameter;
-        E_wood = 1e9;  % 木材弹性模量近似值 (Pa)
-        I_ped = pi * D_ped^4 / 64;  % 惯性矩
-        
-        % 悬臂梁刚度估算: k = 3EI/L^3
-        k_estimated = 3 * E_wood * I_ped / (L_ped^3);
-        k_estimated = max(5, min(k_estimated, 100));  % 限制在合理范围
-        
-        fruitParams.k_pedicel_y = k_estimated;
-        fruitParams.k_pedicel_z = k_estimated * 1.2;  % Z方向略硬
-        
-        % 阻尼估算 - 基于阻尼比
-        zeta_pedicel = 0.05;  % 果柄阻尼比经验值
-        omega_ped = sqrt(k_estimated / preConfig.fruit.mass);
-        c_estimated = 2 * zeta_pedicel * preConfig.fruit.mass * omega_ped;
-        
-        fruitParams.c_pedicel_y = c_estimated;
-        fruitParams.c_pedicel_z = c_estimated * 1.2;
-    end
-    
-    % 断裂力 - 考虑随机性
-    fruitParams.F_break = preConfig.fruit.F_break_mean + ...
-                          preConfig.fruit.F_break_std * randn();
-    fruitParams.F_break = max(2, fruitParams.F_break);  % 最小断裂力
 end
 
 function fruitParams = buildFruitParamsStrict(preConfig, identifiedParams)

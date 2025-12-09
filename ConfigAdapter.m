@@ -439,10 +439,10 @@ function [k_base, c_base, branch_taper] = estimateStiffnessDamping(branchGeom, i
     
     c_base = max(C_vals);
     if c_base <= 0
-        warning('ConfigAdapter:WarnData', '分枝 "%s" 的阻尼识别值异常，将导致仿真不稳定。', branchName);
+        error('ConfigAdapter:WarnData', '分枝 "%s" 的阻尼识别值异常，将导致仿真不稳定。', branchName);
         % 即使阻尼异常也不建议给默认值，最好报错，但此处保留警告让用户决定
     end
-    c_taper = C_vals / (c_base + eps); % 防止除零
+    c_taper = C_vals / c_base; % 防止除零
     
     branch_taper = struct();
     branch_taper.k = k_taper;

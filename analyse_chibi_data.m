@@ -1004,7 +1004,7 @@ function [raw_accel_matrix, actual_fs, time_offset] = loadSingleSensorCSV(filepa
         fprintf(2, '      加载传感器%d的数据序列失败: %s\n', sensor_idx, err.message);
         raw_accel_matrix = [];
     end
-    
+
     if isempty(actual_fs) || isnan(actual_fs)
         error('LoadData:FsError', '无法从时间戳计算有效采样率 (actual_fs)，请检查CSV文件时间列格式。');
     end
@@ -5853,11 +5853,25 @@ function detachment_model = SAD_Stage4_DetachmentForceModeling()
     % 多因素回归模型系数 
     % TODO: 以下为初始估计值，需用实验数据拟合后更新
     % 拟合公式: F_break = beta0 + beta1*H + beta2*P + beta3*D + beta4*S + ε
-    detachment_model.beta0 = 8.5;    % 截距项 (N) - 待校准
-    detachment_model.beta1 = -1.2;   % H_crown系数 (N/m) - 冠层高度
-    detachment_model.beta2 = -2.0;   % P_rel系数 (N) - 相对位置
-    detachment_model.beta3 = 0.8;    % D_fruit系数 (N/cm) - 果实直径
-    detachment_model.beta4 = -3.5;   % S_crack系数 (N) - 开裂状态
+    if evalin('base', 'exist(''detachment_calibration_data'', ''var'')')
+        calib_data = evalin('base', 'detachment_calibration_data');
+        fprintf('    [√] 检测到外部标定数据，正在应用...\n');
+        detachment_model.beta0 = calib_data.beta0;
+        detachment_model.beta1 = calib_data.beta1;
+        detachment_model.beta2 = calib_data.beta2;
+        detachment_model.beta3 = calib_data.beta3;
+        detachment_model.beta4 = calib_data.beta4;
+        detachment_model.sigma_epsilon = calib_data.sigma_epsilon;
+    else
+        % 如果没有数据，抛出错误，强迫用户关注这个问题，而不是默默使用 8.5
+        % 或者弹窗让用户输入
+        answer = questdlg('未检测到果实脱落力标定数据。是否使用标准参考值(仅用于测试)?', ...
+            '标定数据缺失', '使用参考值', '停止并报错', '停止并报错');
+        
+        if strcmp(answer, '停止并报错')
+            error('SAD:MissingCalibration', '流程终止：请先进行果实拉伸试验并导入标定数据。');
+        end
+    end
     
     % 残差标准差
     detachment_model.sigma_epsilon = 1.5;  % N

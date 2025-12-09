@@ -44,9 +44,9 @@ fprintf('━━━━━━━━━━━━━━━━━━━━━━━�
 fprintf('第二步：参数识别\n');
 fprintf('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
 
-identifyChoice = questdlg('请选择参数识别方式:', '参数识别', ...
-                          '运行参数识别', '加载已有识别结果', '跳过（使用估算值）', ...
-                          '加载已有识别结果');
+identifyChoice = questdlg('请选择参数识别方式 (必须基于真实数据):', '参数识别', ...
+                          '运行参数识别 (新实验)', '加载已有识别结果 (MAT文件)', ...
+                          '加载已有识别结果 (MAT文件)');
 
 identifiedParams = [];
 
@@ -58,8 +58,7 @@ switch identifyChoice
         identifiedParams = loadIdentifiedParams();
         
     case '跳过（使用估算值）'
-        fprintf('  将使用基于几何的估算值替代识别参数\n');
-        fprintf('  警告：估算值可能与实际值有较大差异！\n\n');
+        error('违反原则：严禁使用估算值跳过参数识别。所有仿真必须基于实验数据。');
 end
 
 %% ===================================================================
@@ -121,13 +120,11 @@ function identifiedParams = runParameterIdentification(preConfig)
     % 1. 生成所有分枝的 ID 列表 (Trunk, P1, P1_S1, ...)
     all_branch_ids = getAllBranchIDs(preConfig.topology);
     
-    % 2. 让用户选择要处理的分枝
-    [indx, tf] = listdlg('ListString', all_branch_ids, ...
-                         'SelectionMode', 'multiple', ...
-                         'ListSize', [300, 400], ...
-                         'Name', '选择识别对象', ...
-                         'PromptString', '请选择拥有独立实验数据的分枝 (可多选):');
-    
+    % 2. 强制用户必须选择所有分枝，或者程序自动遍历所有分枝
+    fprintf('注意：根据严格数据驱动原则，必须为拓扑中的每一个分枝提供实验数据。\n');
+    indx = 1:length(all_branch_ids); % 强制全选
+    target_branches = all_branch_ids;
+        
     if ~tf, identifiedParams = []; return; end
     target_branches = all_branch_ids(indx);
     
@@ -207,22 +204,6 @@ function identifiedParams = runParameterIdentification(preConfig)
             errordlg(sprintf('处理 %s 时出错: %s', branch_name, ME.message), '错误');
             return;
         end
-    end
-    
-    % 4. 生成全局回退参数 (Global Fallback)
-    if temp_accum.count > 0
-        % 构造一个对角矩阵作为平均值
-        avg_K_diag = temp_accum.K / temp_accum.count;
-        avg_C_diag = temp_accum.C / temp_accum.count;
-        
-        identifiedParams.linear = struct();
-        identifiedParams.linear.K = diag(avg_K_diag);
-        identifiedParams.linear.C = diag(avg_C_diag);
-        % 这里还可以计算 taper_factors 的平均值
-        fprintf('\n  [√] 全部分枝处理完毕。已基于 %d 组数据生成全局基准参数。\n', temp_accum.count);
-    else
-        % 如果一个都没识别成功，必须报错
-        error('未获得任何有效的识别参数，无法继续。');
     end
     
     % 保存总结果

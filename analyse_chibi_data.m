@@ -92,7 +92,6 @@ identified_params = runIdentificationManual(accel_data_cell, ...
         force_data, force_time, fs_final, test_config, time_offsets);
 
 if ~isempty(identified_params)
-    generateUpdateFiles(identified_params);
     generateAnalysisReport(identified_params);
     visualizeResults(identified_params);
 
@@ -3109,21 +3108,7 @@ function params_cv = trainModelForCV(train_segments, fs)
     
     % 检查线性识别是否成功
     if isempty(linear_params) || ~isfield(linear_params, 'identified_params_x')
-        fprintf('      CV警告: 线性识别失败，使用默认参数。\n');
-        
-        % 构造完整的默认参数结构
-        linear_params = struct();
-        linear_params.identified_params_x = [40, 0.05, 150, 0.25, 100, 0.2];
-        linear_params.identified_params_z = [40, 0.05, 150, 0.25, 100, 0.2];
-        linear_params.frequency_vector = linspace(0, fs/2, 1025)';
-        linear_params.FRF_matrix_x = zeros(1025, 3, 3);
-        linear_params.FRF_matrix_z = zeros(1025, 3, 3);
-        linear_params.coherence_matrix_x = zeros(1025, 3, 3);
-        linear_params.coherence_matrix_z = zeros(1025, 3, 3);
-        linear_params.natural_freqs_x = [7];
-        linear_params.damping_ratios_x = [0.05];
-        linear_params.natural_freqs_z = [7];
-        linear_params.damping_ratios_z = [0.05];
+        error('Identify:CVFailed', '交叉验证阶段线性参数识别失败。严禁使用默认值回退，请检查数据质量。');
     end
     
     params_cv.linear = linear_params;
@@ -3223,142 +3208,6 @@ function [freq, damp] = predictResponse(params, segment, direction)
     
     freq = max(1, min(freq, 25));
     damp = max(0.001, min(damp, 0.2));
-end
-
-%% ============ 文件生成函数 ============
-function generateUpdateFiles(params)
-    % 生成更新参数文件 - 最终严谨版
-    % 特性：
-    % 1. 无默认值：缺失数据直接报错
-    % 2. 数据驱动：分枝参数基于实验识别的递减因子(taper_factors)生成
-    
-    % --- 1. 严格性检查 ---
-    if ~isfield(params, 'linear') || ~isfield(params.linear, 'K') || ...
-       ~isfield(params.linear, 'taper_factors')
-        error('Analysis:DataMissing', ...
-              ['严重错误：无法生成参数文件。\n' ...
-               '原因：未检测到有效的线性参数(K)或递减因子(taper_factors)。\n' ...
-               '请检查参数识别流程是否成功完成。']);
-    end
-
-    fid = fopen('UpdatedTreeParameters.m', 'w');
-    if fid == -1, error('无法创建 UpdatedTreeParameters.m 文件！'); end
-    
-    try
-        fprintf(fid, '%%%% 果树振动模型参数更新脚本 (数据驱动版)\n');
-        fprintf(fid, '%%%% 生成时间: %s\n\n', datestr(now));
-        
-        % --- 2. 写入主干参数 (直接读取) ---
-        k_base_val = params.linear.K(1,1);
-        c_base_val = params.linear.C(1,1);
-        
-        fprintf(fid, '%%======= 主干基础参数 =======%%\n');
-        fprintf(fid, 'k_A_base = %.4f;  %% 主干基础刚度 (N/m)\n', k_base_val);
-        fprintf(fid, 'c_A_base = %.4f;  %% 主干基础阻尼 (Ns/m)\n', c_base_val);
-        fprintf(fid, 'z_factor = 1;     %% Z方向因子\n\n');
-        
-        % --- 3. 写入预定义参数结构体 ---
-        fprintf(fid, '%%======= 拓扑参数定义 =======%%\n');
-        fprintf(fid, 'if ~exist(''predefined_params'', ''var''), predefined_params = struct(); end\n\n');
-        
-        % 提取识别出的基准值
-        M_diag = diag(params.linear.M);
-        K_diag = diag(params.linear.K);
-        C_diag = diag(params.linear.C);
-        
-        % 提取非线性参数
-        k3_vals = [0, 0, 0]; c2_vals = [0, 0, 0];
-        if isfield(params, 'nonlinear') && isfield(params.nonlinear, 'k3_coeffs')
-            k3_vals = params.nonlinear.k3_coeffs;
-            c2_vals = params.nonlinear.c2_coeffs;
-        end
-    
-        % --- 4. 生成一级分枝 (P1, P2, P3) ---
-        m_total_est = M_diag(1) / 0.5; % 基于Root质量估算总质量
-        
-        for i = 1:3
-            idx = min(i, length(M_diag));
-            % 反推分枝的基础刚度 (移除 Root 的衰减影响，还原为"名义"刚度)
-            taper_k_root = params.linear.taper_factors.k(1); 
-            k_branch_base = K_diag(idx) / taper_k_root;
-            c_branch_base = C_diag(idx); 
-            
-            fprintf(fid, '%% --- P%d 参数 (基于识别) ---\n', i);
-            % 【关键修改】传递 identified_taper_factors 给生成函数
-            fprintf(fid, 'predefined_params.P%d = generate_branch_segment_params(%.4f, %.4f, %.4f, identified_taper_factors);\n', ...
-                i, m_total_est, k_branch_base, c_branch_base);
-            
-            % 注入非线性参数
-            if k3_vals(idx) ~= 0 || c2_vals(idx) ~= 0
-                fprintf(fid, 'predefined_params.P%d.root.k_nonlinear = %.4e;\n', i, k3_vals(idx));
-                fprintf(fid, 'predefined_params.P%d.root.c_nonlinear = %.4e;\n', i, c2_vals(idx));
-                fprintf(fid, 'predefined_params.P%d.mid.k_nonlinear  = %.4e;\n', i, k3_vals(idx)*0.5);
-                fprintf(fid, 'predefined_params.P%d.tip.k_nonlinear  = %.4e;\n', i, k3_vals(idx)*0.2);
-            end
-            fprintf(fid, '\n');
-        end
-        
-        % --- 5. 动态生成二级和三级分枝参数 ---
-        if evalin('base', 'exist(''config'', ''var'')')
-            topology_config = evalin('base', 'config');
-            num_p = topology_config.num_primary_branches;
-            
-            fprintf(fid, '%% === 二级和三级分枝参数 (基于拓扑配置动态生成) ===\n');
-            for p = 1:num_p
-                % 获取父级分枝的基准参数
-                p_idx = min(p, length(M_diag));
-                k_p_base = K_diag(p_idx);
-                c_p_base = C_diag(p_idx);
-                m_p_base = M_diag(p_idx);
-                
-                % 二级分枝
-                if p <= length(topology_config.secondary_branches_count)
-                    num_s = topology_config.secondary_branches_count(p);
-                    for s = 1:num_s
-                        branch_name_s = sprintf('P%d_S%d', p, s);
-                        
-                        % 【关键修改】仍然需要缩放因子来区分不同层级的大小
-                        % 但这里我们仍然传递 identified_taper_factors 来控制段间关系
-                        scale_s = 1.0 / (s + 1); 
-                        
-                        fprintf(fid, 'predefined_params.%s = generate_branch_segment_params(%.6f, %.6f, %.6f, identified_taper_factors);\n', ...
-                                branch_name_s, m_p_base*scale_s, k_p_base*scale_s, c_p_base*scale_s);
-                        fprintf(fid, 'predefined_params.%s.branch_level = 2;\n', branch_name_s);
-                        
-                        % 三级分枝
-                        if p <= length(topology_config.tertiary_branches_count) && s <= length(topology_config.tertiary_branches_count{p})
-                            num_t = topology_config.tertiary_branches_count{p}(s);
-                            for t = 1:num_t
-                                branch_name_t = sprintf('P%d_S%d_T%d', p, s, t);
-                                scale_t = 1.0 / (t + 2);
-                                
-                                fprintf(fid, 'predefined_params.%s = generate_branch_segment_params(%.6f, %.6f, %.6f, identified_taper_factors);\n', ...
-                                        branch_name_t, m_p_base*scale_s*scale_t, k_p_base*scale_s*scale_t, c_p_base*scale_s*scale_t);
-                                fprintf(fid, 'predefined_params.%s.branch_level = 3;\n', branch_name_t);
-                            end
-                        end
-                    end
-                end
-            end
-        end
-        
-        % --- 6. 写入递减因子 ---
-        fprintf(fid, '\n%% === 从实验数据计算的递减因子 (核心数据) ===\n');
-        fprintf(fid, 'identified_taper_factors = struct();\n');
-        fprintf(fid, 'identified_taper_factors.k = [%.6f, %.6f, %.6f];\n', ...
-                params.linear.taper_factors.k(1), params.linear.taper_factors.k(2), params.linear.taper_factors.k(3));
-        fprintf(fid, 'identified_taper_factors.c = [%.6f, %.6f, %.6f];\n', ...
-                params.linear.taper_factors.c(1), params.linear.taper_factors.c(2), params.linear.taper_factors.c(3));
-        
-        fprintf(fid, '\nuse_identified_params = true;\n');
-        
-        fclose(fid);
-        fprintf('  [√] 已生成参数文件 (UpdatedTreeParameters.m)。\n');
-        
-    catch ME
-        if exist('fid', 'var') && fid > 0, fclose(fid); end
-        rethrow(ME);
-    end
 end
 
 function generateAnalysisReport(params)
@@ -5376,10 +5225,7 @@ function [K, C, params_vec] = computePhysicalParameters(natural_freqs, damping_r
     n = size(M, 1);
     
     if isempty(natural_freqs)
-        K = eye(n) * 100;
-        C = eye(n) * 0.2;
-        params_vec = [50, 0.1, 100, 0.2, 80, 0.15];
-        return;
+        error('Identify:NoModalFreqs', '无法提取模态频率，物理参数反演失败。数据可能无效。');
     end
     
     omega_n = 2 * pi * natural_freqs(1);

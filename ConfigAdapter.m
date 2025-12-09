@@ -116,8 +116,9 @@ function trunk = buildTrunkParams(preConfig, identifiedParams)
         target_lin = identifiedParams.branches.Trunk.linear;
         fprintf('    主干：使用专属识别参数。\n');
     elseif isfield(identifiedParams, 'linear')
-        target_lin = identifiedParams.linear;
-        fprintf('    主干：使用全局平均参数。\n');
+        % [已删除] 严禁使用全局平均参数
+        error('ConfigAdapter:NoTrunkData', ...
+              '主干 (Trunk) 缺少专属的实验识别数据。\n无法构建模型。请进行主干的参数识别。');
     else
         error('ConfigAdapter:NoTrunkParams', '缺少主干参数数据。');
     end
@@ -399,12 +400,11 @@ end
 
 %% ==================== 辅助函数 ====================
 function [k_base, c_base, branch_taper] = estimateStiffnessDamping(branchGeom, identifiedParams, branchName)
-    % 获取分枝刚度和阻尼 - 严格独立数据版 (最终精简版)
-    % 逻辑：不再根据层级去猜参数，而是直接读取该分枝专属的识别结果。
+    % 获取分枝刚度和阻尼 - 严格独立数据驱动版
     
     target_linear_params = [];
     
-    % 1. 【精准匹配】查找该分枝的专属数据
+    % 1. 【严格匹配】必须在 branches 结构体中找到对应名称的数据
     if isfield(identifiedParams, 'branches') && isfield(identifiedParams.branches, branchName)
         branch_data = identifiedParams.branches.(branchName);
         if isfield(branch_data, 'linear')
@@ -412,52 +412,43 @@ function [k_base, c_base, branch_taper] = estimateStiffnessDamping(branchGeom, i
         end
     end
     
-    % 2. 【严格校验】无数据直接报错 (不进行任何回退或全局查找)
+    % 2. 【严格校验】无数据直接报错，严禁回退到全局平均值
     if isempty(target_linear_params)
-        error('ConfigAdapter:NoDataForBranch', ...
-              ['严重错误：分枝 "%s" 缺少实验数据！\n' ...
-               '程序试图查找 identifiedParams.branches.%s 但未找到。\n' ...
-               '请确保在参数识别阶段已选中该分枝的数据文件。'], ...
-               branchName, branchName);
+        error('ConfigAdapter:MissingExperimentData', ...
+              ['严重错误：分枝 "%s" 没有任何实验识别数据！\n' ...
+               '违反了"严格数据驱动"原则。请在参数识别阶段加载该分枝的实验文件。\n' ...
+               '不允许使用全局平均值或父级参数代替。'], ...
+               branchName);
     end
     
     % 3. 数据完整性检查
     if ~isfield(target_linear_params, 'K') || ~isfield(target_linear_params, 'C')
-        error('ConfigAdapter:InvalidData', '分枝 "%s" 的识别结果缺少 K 或 C 矩阵。', branchName);
+        error('ConfigAdapter:InvalidData', '分枝 "%s" 的识别结果损坏，缺少 K 或 C 矩阵。', branchName);
     end
     
-    % 4. 提取矩阵对角元 [Root, Mid, Tip]
+    % 4. 提取矩阵
     K_vals = diag(target_linear_params.K); 
     C_vals = diag(target_linear_params.C);
     
     % 5. 计算基础值 (Base) 和 递减因子 (Taper)
-    % 无论是一级还是三级分枝，只要有独立数据，其物理规律都是一样的：
-    % 刚度最大值作为该分枝的基础刚度，各点比值作为形状因子。
-    
-    % --- 刚度处理 ---
     k_base = max(K_vals);
     if k_base <= 0
         error('ConfigAdapter:BadData', '分枝 "%s" 的刚度识别值无效(全部<=0)。', branchName);
     end
-    k_taper = K_vals / k_base; % 生成 [k_r/max, k_m/max, k_t/max]
+    k_taper = K_vals / k_base; 
     
-    % --- 阻尼处理 ---
     c_base = max(C_vals);
     if c_base <= 0
-        warning('分枝 "%s" 的阻尼识别值异常，使用默认线性衰减。', branchName);
-        c_base = 0.1; 
-        c_taper = [1; 1; 1];
-    else
-        c_taper = C_vals / c_base;
+        warning('ConfigAdapter:WarnData', '分枝 "%s" 的阻尼识别值异常，将导致仿真不稳定。', branchName);
+        % 即使阻尼异常也不建议给默认值，最好报错，但此处保留警告让用户决定
     end
+    c_taper = C_vals / (c_base + eps); % 防止除零
     
-    % 6. 构造输出结构体
     branch_taper = struct();
     branch_taper.k = k_taper;
     branch_taper.c = c_taper;
     
-    fprintf('    分枝 %s (来源: 专属实验数据): k_base=%.2f, c_base=%.4f\n', ...
-            branchName, k_base, c_base);
+    fprintf('    [√] 分枝 %s 参数加载成功 (k_base=%.1f, c_base=%.3f)\n', branchName, k_base, c_base);
 end
 
 function level = determineBranchLevel(branchName)

@@ -366,24 +366,12 @@ disp(newline);
 disp(newline);
 disp('=== 3. 开始定义系统拓扑与参数 (模块化 - 合理化参数版) ===');
 
-% --- 尝试加载识别出的参数 ---
-if exist('UpdatedTreeParameters.m', 'file')
-    disp('检测到 UpdatedTreeParameters.m，正在加载识别参数...');
-    % 为了防止 generate_branch_segment_params 函数未定义错误，先定义它
-    % 注意：UpdatedTreeParameters.m 可能会调用它，所以必须确保它在路径中或在此之前定义
-    % 由于脚本执行顺序问题，我们先定义 helper 函数 generate_branch_segment_params (见脚本末尾)
-    % 这里我们假设 UpdatedTreeParameters.m 内部直接赋值，或者我们先运行脚本末尾的函数定义部分
-    
-    try
-        run('UpdatedTreeParameters.m');
-        disp('  -> 参数加载成功。');
-    catch ME
-        warning(E.identifier, '加载 UpdatedTreeParameters.m 失败: %s。将使用默认参数。', ME.message);
-        use_sad_params = false;
-    end
-else
-    use_sad_params = false;
-    disp('未找到识别参数文件，使用默认参数。');
+% --- 参数来源验证 ---
+% 严禁从文件加载旧参数，必须使用从 ConfigAdapter 传入工作区的 params_struct
+if ~exist('predefined_params', 'var') || isempty(predefined_params)
+    error('BuildModel:NoParams', ...
+          '工作区中缺少 predefined_params。必须通过 Integratedtreevibrationanalysis.m 运行完整流程。\n' + ...
+          '不再支持通过 UpdatedTreeParameters.m 加载参数。');
 end
 
 % --- A. 定义分枝拓扑结构 (Branching Topology Configuration) ---
@@ -3830,34 +3818,7 @@ function build_branch_recursively(model_base_path, ...
     fprintf('  build_branch_recursively: 分枝 "%s" 构建完成。\n', path_id_str_for_names);
 end
 
-%% branch_params
-% --- 辅助函数，用于从单自由度值生成多段参数 ---
-% m_total: 该分枝的总质量
-% k_base: 该分枝的基础刚度 (用于Y方向)
-% c_base: 该分枝的基础阻尼 (用于Y方向)
-% z_factor: Z方向参数与Y方向参数的比例
-% taper_factors_k: 刚度在root/mid/tip连接处的衰减因子 (相对于k_base)
-% taper_factors_c: 阻尼在root/mid/tip连接处的衰减因子 (相对于c_base)
-% mass_dist_factors: 质量在root/mid/tip的分配因子    
-function branch_params = generate_branch_segment_params(m_total, k_base, c_base)
-    z_factor_local = 1; % Z方向参数相对于Y方向的比例因子 (局部，可调整)
-    mass_dist = [0.5, 0.3, 0.2]; % 质量分配: root, mid, tip
-    k_taper   = [0.5, 0.3, 0.2]; % 内部连接刚度衰减因子 for root_conn, mid_conn, tip_conn
-    c_taper   = [1.0, 0.8, 0.6]; % 内部连接阻尼衰减因子
-    
-    branch_params = struct();
-    branch_params.root = struct('m', m_total * mass_dist(1), ...
-                                'k_y_conn', k_base * k_taper(1), 'c_y_conn', c_base * c_taper(1), ...
-                                'k_z_conn', k_base * k_taper(1) * z_factor_local, 'c_z_conn', c_base * c_taper(1) * z_factor_local);
-    branch_params.mid  = struct('m', m_total * mass_dist(2), ...
-                                'k_y_conn', k_base * k_taper(2), 'c_y_conn', c_base * c_taper(2), ...
-                                'k_z_conn', k_base * k_taper(2) * z_factor_local, 'c_z_conn', c_base * c_taper(2) * z_factor_local);
-    branch_params.tip  = struct('m', m_total * mass_dist(3), ...
-                                'k_y_conn', k_base * k_taper(3), 'c_y_conn', c_base * c_taper(3), ...
-                                'k_z_conn', k_base * k_taper(3) * z_factor_local, 'c_z_conn', c_base * c_taper(3) * z_factor_local);
-end
-
-%% plot_tree_topology (主调用函数) - 最终正确版
+%% plot_tree_topology (主调用函数)
 % 功能: 初始化并调用递归函数来绘制果树拓扑结构。
 function plot_tree_topology(config)
     cla; 

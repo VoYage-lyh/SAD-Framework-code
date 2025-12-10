@@ -534,3 +534,73 @@ function validateBranchGeometry(branchGeom, branchName)
         end
     end
 end
+
+% [在文件末尾添加或替换]
+
+function fruit_params = buildFruitParamsStrict(preConfig, identifiedParams)
+    % 功能：基于识别出的统计模型生成果实参数
+    % 核心原则：严禁使用预设的固定值 (如 F=5N)，必须由模型预测得出
+    
+    fruit_params = struct();
+    
+    % 1. 物理属性 (来自 GUI 预配置，这些是几何输入)
+    fruit_params.m = preConfig.fruit.mass;
+    fruit_params.diameter = preConfig.fruit.diameter;
+    % 检查 preConfig 是否包含新字段（兼容旧版配置）
+    if isfield(preConfig.fruit, 'k_pedicel')
+        k_val = preConfig.fruit.k_pedicel;
+        c_val = preConfig.fruit.c_pedicel;
+    else
+        warning('ConfigAdapter:LegacyConfig', '预配置中缺少果柄动力学参数，使用默认值。请更新 GUI 配置。');
+        k_val = 2000;
+        c_val = 0.5;
+    end
+    % 应用到 Y/Z 两个方向 (假设各向同性，或者也可以在GUI分开配置)
+    fruit_params.k_pedicel_y = k_val;
+    fruit_params.c_pedicel_y = c_val;
+    fruit_params.k_pedicel_z = k_val;
+    fruit_params.c_pedicel_z = c_val;
+    
+    % 2. 核心：计算断裂力 F_break
+    % 需要从 identifiedParams 中提取脱落模型
+    % 假设所有分枝共享同一个脱落机制模型，我们取第一个有效分枝的模型即可
+    det_model = [];
+    if isfield(identifiedParams, 'detachment_model')
+        det_model = identifiedParams.detachment_model;
+    elseif isfield(identifiedParams, 'branches')
+        % 遍历寻找含有 detachment_model 的分枝
+        fn = fieldnames(identifiedParams.branches);
+        for i = 1:length(fn)
+            if isfield(identifiedParams.branches.(fn{i}), 'detachment_model')
+                det_model = identifiedParams.branches.(fn{i}).detachment_model;
+                break;
+            end
+        end
+    end
+    
+    if ~isempty(det_model)
+        % 提取 GUI 中配置的平均特征作为输入
+        % 注意：这里将直径从 m 转换为 cm 以匹配标定数据的单位
+        D_input_cm = (preConfig.fruit.diameter * 100); 
+        
+        % 假设场景：中等高度，末端挂果，无开裂
+        H_input_m = 1.5; 
+        P_input_idx = 1.0; % 末端
+        S_input_crack = 0; % 无开裂
+        
+        % 调用模型的预测接口
+        predicted_F = det_model.predict(H_input_m, P_input_idx, D_input_cm, S_input_crack);
+        
+        % 加上随机波动 (模拟果实间的差异，基于识别出的误差 sigma)
+        % 如果希望确定性仿真，去掉 randn 部分
+        final_F_break = predicted_F + det_model.sigma_epsilon * randn();
+        
+        fruit_params.F_break = max(1.0, final_F_break); % 确保力为正值
+        
+        fprintf('    [ConfigAdapter] 果实断裂力 F_break 已由数据模型计算: %.2f N (模型预测值)\n', fruit_params.F_break);
+    else
+        % 如果没有识别结果，为了不让程序崩溃，报错提示
+        error('ConfigAdapter:NoDetachmentModel', ...
+              '未找到果实脱落力模型。请确保在参数识别阶段成功运行了 Stage 4 (基于内置的20组数据)。');
+    end
+end

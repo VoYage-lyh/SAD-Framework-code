@@ -1,166 +1,156 @@
-clc; close all;
-
-%% === 从预配置读取参数 ===
-if evalin('base', 'exist(''analysis_params'', ''var'')')
-    analysis_params = evalin('base', 'analysis_params');
-    fprintf('检测到预配置参数，使用预设值...\n');
+function identified_params = analyse_chibi_data(analysis_config)
+    % ANALYSE_CHIBI_DATA 果树参数识别核心算法函数 (严格数据驱动版)
+    % 输入 analysis_config 结构体必须包含:
+    %   .sensor_files: 结构体 {root, mid, tip, force} 的文件路径
+    %   .detachment_calibration_data: 脱落力标定数据矩阵 (从CSV读取)
+    %   .analysis_params: 信号处理参数 (fs_target, cutoff 等)
+    %   .annotation_file: (可选) 已有的标注文件路径，用于跳过手动标注
     
-    % 覆盖默认值
-    fs_target = analysis_params.fs_target;
-    CUTOFF_FREQ = analysis_params.cutoff_freq;
-    FILTER_ORDER = analysis_params.filter_order;
-    nfft = analysis_params.nfft;
-    freq_range = analysis_params.freq_range;
-    SNR_THRESHOLD = analysis_params.snr_threshold;
-else
-    % 使用默认值
-    fs_target = 1000;
-    CUTOFF_FREQ = 65;
-    FILTER_ORDER = 8;
-    nfft = 2048;
-    freq_range = [3, 50];
-    SNR_THRESHOLD = 10;
-end
-
-%% 安全清理所有图窗
-try
-    % 清理全局变量
-    clear global g_annotation_data;
-    
-    % 获取所有图窗句柄
-    all_figs = findall(groot, 'Type', 'figure');
-    
-    if ~isempty(all_figs)
-        fprintf('检测到 %d 个打开的图窗，正在安全关闭...\n', length(all_figs));
-        
-        % 清除所有图窗的CloseRequestFcn回调，然后关闭
-        for i = 1:length(all_figs)
-            if isvalid(all_figs(i)) && ishandle(all_figs(i))
-                set(all_figs(i), 'CloseRequestFcn', 'closereq'); % 恢复默认关闭函数
-                close(all_figs(i));
-            end
+        % 1. 严格输入检查
+        if nargin < 1 || isempty(analysis_config)
+            error('Strict Mode: 必须提供 analysis_config 输入参数。');
         end
-        fprintf('图窗清理完成\n');
+        
+        % 解包参数
+        files = analysis_config.sensor_files;
+        detachment_matrix = analysis_config.detachment_calibration_data;
+        params = analysis_config.analysis_params;
+        
+        % 应用信号处理参数
+        fs_target = params.fs_target;
+        CUTOFF_FREQ = params.cutoff_freq;
+        FILTER_ORDER = params.filter_order;
+        nfft = params.nfft;
+        
+        fprintf('  [参数识别] 正在处理数据...\n');
+    
+    %% 安全清理所有图窗
+    try
+        % 清理全局变量
+        clear global g_annotation_data;
+        
+        % 获取所有图窗句柄
+        all_figs = findall(groot, 'Type', 'figure');
+        
+        if ~isempty(all_figs)
+            fprintf('检测到 %d 个打开的图窗，正在安全关闭...\n', length(all_figs));
+            
+            % 清除所有图窗的CloseRequestFcn回调，然后关闭
+            for i = 1:length(all_figs)
+                if isvalid(all_figs(i)) && ishandle(all_figs(i))
+                    set(all_figs(i), 'CloseRequestFcn', 'closereq'); % 恢复默认关闭函数
+                    close(all_figs(i));
+                end
+            end
+            fprintf('图窗清理完成\n');
+        end
+        
+    catch ME
+        % 如果清理过程出现错误，强制关闭
+        fprintf('安全清理失败，强制关闭所有图窗: %s\n', ME.message);
+        close all force;
     end
     
-catch ME
-    % 如果清理过程出现错误，强制关闭
-    fprintf('安全清理失败，强制关闭所有图窗: %s\n', ME.message);
-    close all force;
-end
-
-% 强制刷新和短暂暂停
-drawnow;
-pause(0.1);
-
-%% ==================== 主程序执行部分 ====================
-
-fprintf('========================================\n');
-fprintf('   果树非线性振动参数识别系统 V6.0\n');
-fprintf('   (最终优化和修复版本)\n');
-fprintf('========================================\n\n');
-
-% 步骤 1: 独立加载三组原始数据，得到一个 cell 数组
-[accel_data_cell_raw, force_data, force_time, fs, test_config, time_offsets] = loadMultiSensorData();
-if isempty(accel_data_cell_raw), return; end
-
-% 步骤 2: 调用自动对齐函数，输入 cell，输出对齐后的 cell
-[accel_data_cell, fs_final] = alignSignalsWithXCorr(accel_data_cell_raw);
-if isempty(accel_data_cell), return; end % 如果对齐失败则退出
-
-fprintf('\n========== 数据完整性验证 ==========\n');
-for i = 1:3
-    n_samples = length(accel_data_cell{i}.time);
-    duration = accel_data_cell{i}.time(end);
-    fprintf('  传感器%d: %d个样本, 时长%.1fs\n', i, n_samples, duration);
-end
-if ~isempty(force_time)
-    fprintf('  力信号: %d个样本, 时长%.1fs\n', length(force_time), force_time(end));
-end
-fprintf('====================================\n\n');
-
-fprintf('\n========================================\n');
-fprintf('   完整的时间偏移量统计\n');
-fprintf('========================================\n');
-fprintf('  传感器1（根部）: %.4f 秒\n', time_offsets(1));
-fprintf('  传感器2（中部）: %.4f 秒\n', time_offsets(2));
-fprintf('  传感器3（顶部）: %.4f 秒\n', time_offsets(3));
-fprintf('========================================\n\n');
-
-% 步骤 3: 使用完美对齐的 cell 数据进入手动标注流程 (无需修改下游函数)
-identified_params = runIdentificationManual(accel_data_cell, ...
-        force_data, force_time, fs_final, test_config, time_offsets);
-
-if ~isempty(identified_params)
-    generateAnalysisReport(identified_params);
-    visualizeResults(identified_params);
-
-    fprintf('\n========================================\n');
-    fprintf('   参数识别完成！\n');
-    fprintf('========================================\n');
-else
-    fprintf('\n========================================\n');
-    fprintf('   用户取消或未完成参数识别流程。\n');
-    fprintf('========================================\n');
-end
-
-%% ============ 数据加载函数 ============
-function [accel_data_cell, force_data, force_time, fs, test_config, time_offsets] = loadMultiSensorData()
-    % 功能：加载原始数据（不做任何处理）
+    % 强制刷新和短暂暂停
+    drawnow;
+    pause(0.1);
     
+    %% ==================== 主程序执行部分 ====================
+    
+    fprintf('========================================\n');
+    fprintf('   果树非线性振动参数识别系统 V6.0\n');
+    fprintf('   (最终优化和修复版本)\n');
+    fprintf('========================================\n\n');
+    
+    % 步骤 1: 独立加载三组原始数据，得到一个 cell 数组
+    [accel_data_cell_raw, force_data, force_time, fs, test_config, time_offsets] = loadMultiSensorData();
+    if isempty(accel_data_cell_raw), return; end
+    
+    % 步骤 2: 调用自动对齐函数，输入 cell，输出对齐后的 cell
+    [accel_data_cell, fs_final] = alignSignalsWithXCorr(accel_data_cell_raw);
+    if isempty(accel_data_cell), return; end % 如果对齐失败则退出
+    
+    fprintf('\n========== 数据完整性验证 ==========\n');
+    for i = 1:3
+        n_samples = length(accel_data_cell{i}.time);
+        duration = accel_data_cell{i}.time(end);
+        fprintf('  传感器%d: %d个样本, 时长%.1fs\n', i, n_samples, duration);
+    end
+    if ~isempty(force_time)
+        fprintf('  力信号: %d个样本, 时长%.1fs\n', length(force_time), force_time(end));
+    end
+    fprintf('====================================\n\n');
+    
+    fprintf('\n========================================\n');
+    fprintf('   完整的时间偏移量统计\n');
+    fprintf('========================================\n');
+    fprintf('  传感器1（根部）: %.4f 秒\n', time_offsets(1));
+    fprintf('  传感器2（中部）: %.4f 秒\n', time_offsets(2));
+    fprintf('  传感器3（顶部）: %.4f 秒\n', time_offsets(3));
+    fprintf('========================================\n\n');
+    
+    % 步骤 3: 使用完美对齐的 cell 数据进入手动标注流程 (无需修改下游函数)
+    identified_params = runIdentificationManual(accel_data_cell, ...
+            force_data, force_time, fs_final, test_config, time_offsets);
+    
+    if ~isempty(identified_params)
+        generateAnalysisReport(identified_params);
+        visualizeResults(identified_params);
+    
+        fprintf('\n========================================\n');
+        fprintf('   参数识别完成！\n');
+        fprintf('========================================\n');
+    else
+        fprintf('\n========================================\n');
+        fprintf('   用户取消或未完成参数识别流程。\n');
+        fprintf('========================================\n');
+    end
+end
+%% ============ 数据加载函数 ============
+function [accel_data_cell, force_data, force_time, fs, test_config, time_offsets] = loadMultiSensorData(files)
+    % 功能：加载原始数据（不做任何处理）
+    % 直接使用传入的文件路径，严禁弹窗
+
     accel_data_cell = {}; 
     force_data = []; 
     force_time = [];
     fs = 1000;
     test_config = struct();
+
+    sensor_names = {'Root', 'Mid', 'Tip'};
+    accel_data_raw_cell = cell(1, 3);
+    actual_fs_list = zeros(1, 3);
     time_offsets = zeros(1, 3);
-    
-    try
-        sensor_names = {'根部传感器', '中部传感器', '顶部传感器'};
-        accel_data_raw_cell = cell(1, 3);
-        actual_fs_list = zeros(1, 3);
-        
-        fprintf('\n========== 阶段1: 读取原始数据（不做处理） ==========\n');
-        
-        for i = 1:3
-            fprintf('  [%d/3] 请选择%s的CSV文件...\n', i, sensor_names{i});
-            [filename, pathname] = uigetfile('*.csv', sprintf('选择%s数据文件', sensor_names{i}), pwd);
-            if isequal(filename, 0), error('用户取消了文件选择。'); end
-            
-            [accel_matrix, actual_fs, single_offset] = loadSingleSensorCSV(...
-                fullfile(pathname, filename), i);
-            
-            if isempty(accel_matrix), error('传感器 %d 加载失败。', i); end
-            
-            accel_data_raw_cell{i} = accel_matrix;
-            actual_fs_list(i) = actual_fs;
-            time_offsets(i) = single_offset;
-            
-            fprintf('    ✓ 传感器 %d: 读取 %d 个数据点, 采样率 %.2f Hz\n', ...
-                i, size(accel_matrix, 1), actual_fs);
+    fprintf('\n========== 阶段1: 读取原始数据（不做处理） ==========\n');
+    % 加载加速度数据
+    path_list = {files.root, files.mid, files.tip};
+    for i = 1:3
+        if ~exist(path_list{i}, 'file')
+            error('Strict Mode: 找不到文件 %s', path_list{i});
         end
-        
-        % 直接保存原始数据和采样率，不做重采样
-        for i = 1:3
-            data = accel_data_raw_cell{i};
-            time_vec = (0:size(data,1)-1)' / actual_fs_list(i);
-            accel_data_cell{i} = struct('time', time_vec, 'data', data, 'fs', actual_fs_list(i));
-        end
-        
-        fprintf('\n  [+] 请选择力锤传感器的文件...\n');
-        [force_filename, force_pathname] = uigetfile('*.csv;*.xls;*.xlsx', '选择力锤数据文件');
-        if ~isequal(force_filename, 0)
-            [force_time, force_data] = loadForceXLS(fullfile(force_pathname, force_filename));
-        end
-        
-        test_config.data_source = 'RawData_NoAlignment';
-        test_config.fs = fs;
-        test_config.actual_fs_list = actual_fs_list;
-        
-    catch ME
-        errordlg(sprintf('数据加载失败: %s', ME.message), '加载错误');
-        accel_data_cell = {}; force_data = []; force_time = []; fs = []; test_config = []; time_offsets = [];
+        [accel_matrix, actual_fs, single_offset] = loadSingleSensorCSV(path_list{i}, i);
+        if isempty(accel_matrix), error('传感器 %d 数据无效', i); end
+        accel_data_raw_cell{i} = accel_matrix;
+        actual_fs_list(i) = actual_fs;
+        time_offsets(i) = single_offset;
     end
+    
+    % 直接保存原始数据和采样率，不做重采样
+    for i = 1:3
+        data = accel_data_raw_cell{i};
+        time_vec = (0:size(data,1)-1)' / actual_fs_list(i);
+        accel_data_cell{i} = struct('time', time_vec, 'data', data, 'fs', actual_fs_list(i));
+    end
+    
+    % 加载力锤数据
+    if ~exist(files.force, 'file')
+        error('Strict Mode: 找不到力锤文件 %s', files.force);
+    end
+    [force_time, force_data] = loadForceXLS(files.force);
+    
+    fs = 1000; % 或根据 actual_fs_list 确定
+    test_config.data_source = 'AutoLoaded_Strict';
+
 end
 
 
@@ -5837,31 +5827,17 @@ end
 %% =====================================================================
 
 function detachment_model = SAD_Stage4_DetachmentForceModeling()
-    % SAD_Stage4_DetachmentForceModeling - 果实脱落力模型 (严格数据驱动版)
-    %
-    % 核心机制：
-    %   1. 内置试验原始数据 (Raw Data Source)。
-    %   2. 实时进行多元线性回归 (OLS)，计算 beta 系数。
-    %   3. 消除“硬编码系数”，实现数据变动模型自动跟随。
-    %
-    % 输入：无
-    % 输出：detachment_model - 包含回归系数和预测函数的结构体
+   % SAD_Stage4_DetachmentForceModeling - 果实脱落力统计标定
+    % 核心机制：内置20组人工转录的原始试验数据，实时计算回归系数。
     
-    fprintf('  [4.1] 初始化脱落力模型 (正在执行实时回归分析)...\n');
+    fprintf('  [4.1] 正在基于内置的20组试验数据建立脱落力预测模型...\n');
     
     detachment_model = struct();
     
     % ==========================================================
-    % 1. 试验原始数据录入 (来源于 Dataset_Exp_2025_01.png)
+    % 1. 内置试验原始数据 (Raw Data Source)
     % ==========================================================
-    % 格式说明:
-    % Col 1: 长轴 (mm)
-    % Col 2: 短轴 (mm)
-    % Col 3: 质量 (g) - (注：本模型暂未使用质量，但保留供后续拓展)
-    % Col 4: 脱落力 F (N) -> [目标变量 Y]
-    % Col 5: 开裂 (1/0)   -> [自变量 X4]
-    % Col 6: 冠层高度 (mm)-> [自变量 X1]
-    % Col 7: 相对位置 (1=根部, 2=中段, 3=末端) -> 需转换为 0/0.5/1.0
+    % 格式: [长轴(mm), 短轴(mm), 质量(g), 脱落力F(N), 开裂(0/1), 冠层高度(mm), 相对位置(1/2/3)]
     
     % 人工转录的20组试验数据
     raw_data = [ ...
@@ -5888,57 +5864,53 @@ function detachment_model = SAD_Stage4_DetachmentForceModeling()
     ];
 
     % ==========================================================
-    % 2. 数据预处理 (Data Cleaning & Feature Engineering)
+    % 2. 数据预处理 (特征工程)
     % ==========================================================
-    
-    % Y: 脱落力
+    % 目标变量 Y: 脱落力 (N)
     Y_target = raw_data(:, 4);
     
-    % X1: 冠层高度 (mm -> m)
+    % 自变量 X:
+    % X1: 冠层高度 (m) <- 原始数据是mm
     H_vec = raw_data(:, 6) / 1000;
     
-    % X2: 相对位置 (Mapping: 1->0, 2->0.5, 3->1.0)
-    % 1=根部, 2=中段, 3=末端
-    pos_map = [0; 0.5; 1.0]; 
+    % X2: 相对位置 (映射: 1根->0, 2中->0.5, 3末->1.0)
+    pos_map_vals = [0; 0.5; 1.0]; 
     P_indices = raw_data(:, 7);
-    P_vec = pos_map(P_indices);
+    P_vec = pos_map_vals(P_indices);
     
-    % X3: 果实平均直径 (mm -> cm)
+    % X3: 果实平均直径 (cm) <- 原始数据是mm
     % D = (长轴 + 短轴) / 2 / 10
     D_vec = (raw_data(:, 1) + raw_data(:, 2)) / 2 / 10;
     
     % X4: 开裂状态 (0/1)
     S_vec = raw_data(:, 5);
     
-    % 构建回归矩阵 X (包含截距项列)
-    % [1, H, P, D, S]
+    % 构建回归矩阵 X (增加常数项列)
+    % [Const, H, P, D, S]
     n_samples = length(Y_target);
     X_matrix = [ones(n_samples, 1), H_vec, P_vec, D_vec, S_vec];
     
     % ==========================================================
-    % 3. 执行回归分析 (Real-time Calculation)
+    % 3. 执行回归分析 (计算 Beta 系数)
     % ==========================================================
+    [beta_coeffs, ~, ~, ~, stats] = regress(Y_target, X_matrix);
     
-    % 使用 regress 函数计算系数
-    [beta_coeffs, bint, r, rint, stats] = regress(Y_target, X_matrix);
+    % 保存模型系数
+    detachment_model.beta0 = beta_coeffs(1); % 截距
+    detachment_model.beta1 = beta_coeffs(2); % 高度系数
+    detachment_model.beta2 = beta_coeffs(3); % 位置系数
+    detachment_model.beta3 = beta_coeffs(4); % 直径系数
+    detachment_model.beta4 = beta_coeffs(5); % 开裂系数
     
-    % 提取系数
-    detachment_model.beta0 = beta_coeffs(1); % Const
-    detachment_model.beta1 = beta_coeffs(2); % H
-    detachment_model.beta2 = beta_coeffs(3); % P
-    detachment_model.beta3 = beta_coeffs(4); % D
-    detachment_model.beta4 = beta_coeffs(5); % S
-    
-    % 统计指标
+    % 保存统计量
     detachment_model.R_squared = stats(1);
-    detachment_model.F_stat = stats(2);
     detachment_model.p_value = stats(3);
-    detachment_model.sigma_epsilon = sqrt(stats(4)); % 误差方差的平方根
+    detachment_model.sigma_epsilon = sqrt(stats(4)); % 误差标准差
     
     % ==========================================================
-    % 4. 定义预测接口
+    % 4. 构建预测接口函数
     % ==========================================================
-    
+    % 该接口将被 ConfigAdapter 调用，用于为具体的仿真果实生成参数
     detachment_model.predict = @(H, P, D, S) ...
         detachment_model.beta0 + ...
         detachment_model.beta1 * H + ...
@@ -5946,43 +5918,9 @@ function detachment_model = SAD_Stage4_DetachmentForceModeling()
         detachment_model.beta3 * D + ...
         detachment_model.beta4 * S;
 
-    % 批量预测 (带噪声模拟)
-    detachment_model.batch_predict = @(H, P, D, S, n) ...
-        batch_predict_internal(detachment_model, H, P, D, S, n);
-
-    % 日志输出 (显示真实计算出的值)
-    fprintf('    [√] 回归分析完成 (N=%d)\n', n_samples);
-    fprintf('        公式: F = %.2f + (%.2f)*H + (%.2f)*P + (%.2f)*D + (%.2f)*S\n', ...
+    fprintf('    [√] 脱落力模型构建完成 (R²=%.4f)\n', stats(1));
+    fprintf('        回归公式: F = %.2f + %.2f*H + %.2f*P + %.2f*D + %.2f*S\n', ...
             beta_coeffs(1), beta_coeffs(2), beta_coeffs(3), beta_coeffs(4), beta_coeffs(5));
-    fprintf('        统计: R²=%.4f, P-value=%.2e, Sigma=%.3f\n', ...
-            stats(1), stats(3), detachment_model.sigma_epsilon);
-            
-    if stats(1) < 0.5
-        warning('SAD:LowFitting', '模型拟合度 R² 过低 (%.2f)，请检查试验数据质量！', stats(1));
-    end
-end
-
-% ----------------------------------------------------------
-% 内部函数：批量预测
-% ----------------------------------------------------------
-function F = batch_predict_internal(model, H, P, D, S, n)
-    % 严格数据驱动：维度检查
-    if numel(H) ~= numel(P) || numel(H) ~= numel(D)
-        error('SAD:DimMismatch', '分枝数据维度必须严格一一对应 (One-to-One Mapping)！');
-    end
-
-    % 确定性部分
-    F_mean = model.beta0 + ...
-             model.beta1 * H(:) + ...
-             model.beta2 * P(:) + ...
-             model.beta3 * D(:) + ...
-             model.beta4 * S(:);
-             
-    % 随机性部分 (基于回归残差分布)
-    noise = model.sigma_epsilon * randn(max(n, numel(H)), 1);
-    
-    F = F_mean + noise;
-    F(F < 0) = 0; % 物理约束
 end
 
 %% =====================================================================

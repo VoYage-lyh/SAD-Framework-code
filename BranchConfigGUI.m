@@ -97,7 +97,8 @@ function config = BranchConfigGUI()
               'String', '取消', ...
               'Position', [850 15 80 30], ...
               'Callback', @(~,~) cancelConfig(fig));
-    
+
+    cleanupObj = onCleanup(@() deleteValidFigure(fig));
     uiwait(fig);
     
     if isvalid(fig)
@@ -149,12 +150,14 @@ function config = getDefaultConfig()
         config.topology.tertiary_branches_count);
     
     % 果实参数（物理属性）
-    config.fruit.mass = 0.08;                   % 单个果实质量 (kg)
-    config.fruit.diameter = 0.06;               % 果实直径 (m)
+    config.fruit.mass = 0.025;                   % 单个果实质量 (kg)
+    config.fruit.diameter = 0.043;               % 果实直径 (m)
     config.fruit.pedicel_length = 0.02;         % 果柄长度 (m)
     config.fruit.pedicel_diameter = 0.003;      % 果柄直径 (m)
-    config.fruit.F_break_mean = 5.0;            % 平均断裂力 (N)
-    config.fruit.F_break_std = 1.0;             % 断裂力标准差 (N)
+    config.fruit.F_break_mean = 20.25;            % 平均断裂力 (N)
+    config.fruit.F_break_std = 11.90;             % 断裂力标准差 (N)
+    config.fruit.k_pedicel = 2000;              % 果柄拉伸/弯曲刚度 (N/m) - 文献参考值
+    config.fruit.c_pedicel = 0.5;               % 果柄阻尼系数 (Ns/m) - 文献参考值
     
     % 果实位置配置（新逻辑：二级和三级分枝的mid和tip都挂果）
     config.fruit.attach_secondary_mid = true;   % 二级分枝mid挂果
@@ -447,6 +450,8 @@ function createFruitConfigPanel(parent, config)
         '果柄直径 (m):', 'edit_fruit_pedicel_diameter', num2str(config.fruit.pedicel_diameter);
         '平均断裂力 (N):', 'edit_fruit_Fbreak_mean', num2str(config.fruit.F_break_mean);
         '断裂力标准差 (N):', 'edit_fruit_Fbreak_std', num2str(config.fruit.F_break_std);
+        '果柄刚度 (N/m):', 'edit_fruit_k_pedicel', num2str(config.fruit.k_pedicel);
+        '果柄阻尼 (Ns/m):', 'edit_fruit_c_pedicel', num2str(config.fruit.c_pedicel);
     };
     
     for i = 1:size(physParams, 1)
@@ -912,6 +917,10 @@ function config = collectAllParameters(fig)
         config.fruit.pedicel_diameter = getEditValue(fig, 'edit_fruit_pedicel_diameter', 'double');
         config.fruit.F_break_mean = getEditValue(fig, 'edit_fruit_Fbreak_mean', 'double');
         config.fruit.F_break_std = getEditValue(fig, 'edit_fruit_Fbreak_std', 'double');
+
+        config.fruit.k_pedicel = getEditValue(fig, 'edit_fruit_k_pedicel', 'double');
+        config.fruit.c_pedicel = getEditValue(fig, 'edit_fruit_c_pedicel', 'double');
+
         config.fruit.attach_secondary_mid = getCheckValue(fig, 'check_secondary_mid');
         config.fruit.attach_secondary_tip = getCheckValue(fig, 'check_secondary_tip');
         config.fruit.attach_tertiary_mid = getCheckValue(fig, 'check_tertiary_mid');
@@ -1065,6 +1074,8 @@ function updateUIFromConfig(fig, config)
     setEditValue(fig, 'edit_fruit_pedicel_diameter', num2str(config.fruit.pedicel_diameter));
     setEditValue(fig, 'edit_fruit_Fbreak_mean', num2str(config.fruit.F_break_mean));
     setEditValue(fig, 'edit_fruit_Fbreak_std', num2str(config.fruit.F_break_std));
+    setEditValue(fig, 'edit_fruit_k_pedicel', num2str(config.fruit.k_pedicel));
+    setEditValue(fig, 'edit_fruit_c_pedicel', num2str(config.fruit.c_pedicel));
     
     % 挂果位置配置
     setCheckValue(fig, 'check_secondary_mid', config.fruit.attach_secondary_mid);
@@ -1234,5 +1245,11 @@ function [primary, secondary, tertiary] = generateDefaultBranchParams(num_primar
                 end
             end
         end
+    end
+end
+
+function deleteValidFigure(h)
+    if isvalid(h)
+        delete(h);
     end
 end

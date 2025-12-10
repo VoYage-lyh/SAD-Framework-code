@@ -211,9 +211,13 @@ function identifiedParams = runParameterIdentification(preConfig)
             
             % === 步骤 D: 捕获结果 (修正作用域问题) ===
             % 直接检查当前工作区，而不是 Base 工作区
-            if exist('identified_params', 'var')
+            if exist('identified_params', 'var')                
+                if ~isfield(identified_params, 'detachment_model')
+                    % 如果脚本没自动跑 Stage 4，这里手动补充调用
+                    identified_params.detachment_model = SAD_Stage4_DetachmentForceModeling();
+                end
                 current_result = identified_params;
-                
+
                 % 验证结果有效性
                 if isempty(current_result)
                     error('识别脚本返回了空结果，请检查数据质量。');

@@ -196,61 +196,62 @@ function identifiedParams = runParameterIdentification(preConfig)
         current_data_config.tip_file = fullfile(p_tip, f_tip);
         current_data_config.force_file = fullfile(p_force, f_force);
         
-        % 关键：推送到 Base Workspace，触发识别脚本的“无头模式”
-        assignin('base', 'auto_load_config', current_data_config);
+        % 构建标准化的输入结构体 analysis_config
+        analysis_config = struct();
+        analysis_config.sensor_files = struct('root', fullfile(p_root, f_root), ...
+                                              'mid', fullfile(p_mid, f_mid), ...
+                                              'tip', fullfile(p_tip, f_tip), ...
+                                              'force', fullfile(p_force, f_force));
+        % 暂时不需要外部标定文件，Stage 4 使用内置数据
+        analysis_config.detachment_calibration_data = []; 
+        
+        % 传递从 ConfigAdapter 获取的分析参数 (fs_target, cutoff 等)
+        % 注意：analysis_params 必须在循环外已通过 ConfigAdapter 获取
+        analysis_config.analysis_params = analysis_params;
         
         try
-            % === 步骤 C: 运行识别脚本 ===
-            % 清理当前工作区可能残留的结果变量
-            if exist('identified_params', 'var'), clear identified_params; end
+            % === 步骤 C: 运行识别函数 ===
+            fprintf('  正在运行核心识别算法 (analyse_chibi_data)...\n');
             
-            fprintf('  正在运行核心识别算法 (analyse_chibi_data.m)...\n');
+            % [核心修正1] 直接调用函数获取结果
+            % 函数模式下，结果直接返回给 current_result，不会生成 identified_params 变量
+            current_result = analyse_chibi_data(analysis_config);
             
-            % 运行脚本。注意：脚本将在当前函数的工作区执行。
-            run('analyse_chibi_data.m'); 
-            
-            % === 步骤 D: 捕获结果 (修正作用域问题) ===
-            % 直接检查当前工作区，而不是 Base 工作区
-            if exist('identified_params', 'var')                
-                if ~isfield(identified_params, 'detachment_model')
-                    % 如果脚本没自动跑 Stage 4，这里手动补充调用
-                    identified_params.detachment_model = SAD_Stage4_DetachmentForceModeling();
-                end
-                current_result = identified_params;
-
-                % 验证结果有效性
-                if isempty(current_result)
-                    error('识别脚本返回了空结果，请检查数据质量。');
-                end
-                
-                % === 可视化确认环节 ===
-                % 让用户快速确认一下拟合图像，保证质量
-                btn = questdlg(sprintf('【%s】参数识别完成。\n请检查生成的图表（如FRF拟合、非线性回归）。\n结果是否合格？', branch_name), ...
-                               '质量确认', ...
-                               '合格，保存并继续', '不合格，重试', '合格，保存并继续');
-                
-                if strcmp(btn, '不合格，重试')
-                    fprintf('  [!] 用户标记结果不合格，正在重置当前分枝...\n');
-                    i = i - 1; % 回退索引，重新处理当前分枝
-                    continue;
-                elseif isempty(btn) || strcmp(btn, '取消')
-                    error('用户取消流程');
-                end
-                
-                % === 步骤 E: 保存数据 ===
-                identifiedParams.branches.(branch_name) = current_result;
-                fprintf('  [√] 分枝 %s 参数已成功保存。\n', branch_name);
-                
-                % === 清理工作区，准备下一轮 ===
-                close all;  % 关闭所有图表
-                clear identified_params; % 清除局部变量
-                evalin('base', 'clear auto_load_config'); % 清除 Base 中的配置，防止误读
-                
-            else
-                % 这是一个严重的逻辑错误，说明脚本跑完了但没生成变量
-                error('严重错误：脚本运行结束，但在当前工作区未找到 "identified_params" 变量。\n请检查 analyse_chibi_data.m 是否正确执行了赋值操作。');
+            % === 步骤 D: 验证结果 ===
+            if isempty(current_result)
+                error('识别函数返回了空结果，请检查数据质量或标注过程。');
             end
             
+            % [核心修正2] 移除对私有子函数 SAD_Stage4... 的外部调用
+            % 该函数在 analyse_chibi_data 内部，外部无法访问。
+            % 逻辑上应信任 analyse_chibi_data 已包含完整流程。
+            if ~isfield(current_result, 'detachment_model')
+                 warning('返回结果中缺少 detachment_model，请检查 analyse_chibi_data 函数逻辑。');
+            end
+
+            % === 可视化确认环节 ===
+            btn = questdlg(sprintf('【%s】参数识别完成。\n请检查生成的图表（如FRF拟合、非线性回归）。\n结果是否合格？', branch_name), ...
+                           '质量确认', ...
+                           '合格，保存并继续', '不合格，重试', '合格，保存并继续');
+            
+            if strcmp(btn, '不合格，重试')
+                fprintf('  [!] 用户标记结果不合格，正在重置当前分枝...\n');
+                i = i - 1; % 回退索引，重新处理当前分枝
+                continue;
+            elseif isempty(btn) || strcmp(btn, '取消')
+                error('用户取消流程');
+            end
+            
+            % === 步骤 E: 保存数据 ===
+            % 直接使用函数返回的 current_result
+            identifiedParams.branches.(branch_name) = current_result;
+            fprintf('  [√] 分枝 %s 参数已成功保存。\n', branch_name);
+            
+            % === 清理 ===
+            close all;  % 关闭所有图表
+            % [核心修正3] 移除对 identified_params 和 auto_load_config 的清理
+            % 因为函数调用模式下不会产生这些临时变量，无需清理
+
         catch ME
             % 错误处理：提供详细信息
             errordlg(sprintf('处理分枝 %s 时发生错误:\n%s', branch_name, ME.message), '识别中断');
@@ -387,24 +388,21 @@ function runSimulation(sim_params)
         fprintf('  工作目录已切换至: %s\n', sim_params.workFolder);
     end
     
-    % 2. 导出所有仿真参数到工作区 (核心步骤)
-    % 这一步非常关键，它会将 config, params_struct 等变量推送到 Base Workspace
-    % Build_Extended_MDOF_model.m 将直接从 Base Workspace 读取这些变量
-    exportSimParamsToWorkspace(sim_params);
+    % 2. 直接调用仿真函数 (核心步骤)
+    % 不再污染 Base Workspace，实现完全闭环
     
-    fprintf('  [√] 仿真参数已成功导出到工作区。\n');
-    fprintf('  正在启动模型构建与仿真脚本 (Build_Extended_MDOF_model.m)...\n\n');
+    fprintf('  正在启动模型构建与仿真函数 (Build_Extended_MDOF_model)...\n\n');
     
-    % 3. 自动运行构建和仿真脚本 (修改点)
     try
-        % 检查脚本是否存在
-        if exist('Build_Extended_MDOF_model.m', 'file') ~= 2
+        % 检查函数是否存在
+        if exist('Build_Extended_MDOF_model', 'file') ~= 2 && exist('Build_Extended_MDOF_model', 'file') ~= 6
             error('MATLAB:FileNotFound', ...
-                '未找到 "Build_Extended_MDOF_model.m" 文件，无法自动运行。');
+                '未找到 "Build_Extended_MDOF_model.m" 函数文件，无法自动运行。');
         end
         
-        % === 自动执行 ===
-        run('Build_Extended_MDOF_model.m');
+        % === 自动执行函数 ===
+        % 传入 sim_params，返回 simulation_results (如果需要可以捕获)
+        Build_Extended_MDOF_model(sim_params);
         
         fprintf('\n========================================\n');
         fprintf('   全流程自动化执行完毕！\n');

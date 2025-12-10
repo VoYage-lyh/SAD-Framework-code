@@ -13,7 +13,6 @@ function identified_params = analyse_chibi_data(analysis_config)
         
         % 解包参数
         files = analysis_config.sensor_files;
-        detachment_matrix = analysis_config.detachment_calibration_data;
         params = analysis_config.analysis_params;
         
         % 应用信号处理参数
@@ -63,12 +62,13 @@ function identified_params = analyse_chibi_data(analysis_config)
     fprintf('========================================\n\n');
     
     % 步骤 1: 独立加载三组原始数据，得到一个 cell 数组
-    [accel_data_cell_raw, force_data, force_time, fs, test_config, time_offsets] = loadMultiSensorData();
+    [accel_data_cell_raw, force_data, force_time, fs, test_config, time_offsets] = loadMultiSensorData(files, fs_target);
     if isempty(accel_data_cell_raw), return; end
     
     % 步骤 2: 调用自动对齐函数，输入 cell，输出对齐后的 cell
     [accel_data_cell, fs_final] = alignSignalsWithXCorr(accel_data_cell_raw);
     if isempty(accel_data_cell), return; end % 如果对齐失败则退出
+    test_config.analysis_params = params;
     
     fprintf('\n========== 数据完整性验证 ==========\n');
     for i = 1:3
@@ -107,50 +107,49 @@ function identified_params = analyse_chibi_data(analysis_config)
     end
 end
 %% ============ 数据加载函数 ============
-function [accel_data_cell, force_data, force_time, fs, test_config, time_offsets] = loadMultiSensorData(files)
+function [accel_data_cell, force_data, force_time, fs, test_config, time_offsets] = loadMultiSensorData(files, target_fs)
     % 功能：加载原始数据（不做任何处理）
     % 直接使用传入的文件路径，严禁弹窗
-
-    accel_data_cell = {}; 
-    force_data = []; 
-    force_time = [];
-    fs = 1000;
+        
+    fs = target_fs; % 传递目标采样率供后续流程使用（本函数内仅透传）
     test_config = struct();
-
-    sensor_names = {'Root', 'Mid', 'Tip'};
+    
+    % 预分配过程变量
     accel_data_raw_cell = cell(1, 3);
     actual_fs_list = zeros(1, 3);
     time_offsets = zeros(1, 3);
+    
     fprintf('\n========== 阶段1: 读取原始数据（不做处理） ==========\n');
+    
     % 加载加速度数据
     path_list = {files.root, files.mid, files.tip};
     for i = 1:3
         if ~exist(path_list{i}, 'file')
             error('Strict Mode: 找不到文件 %s', path_list{i});
         end
+        % 调用单传感器加载函数
         [accel_matrix, actual_fs, single_offset] = loadSingleSensorCSV(path_list{i}, i);
-        if isempty(accel_matrix), error('传感器 %d 数据无效', i); end
-        accel_data_raw_cell{i} = accel_matrix;
+        
+        if isempty(accel_matrix)
+            error('传感器 %d 数据无效', i); 
+        end
+        
+        time_vec_raw = (0:size(accel_matrix,1)-1)' / actual_fs;
+        accel_data_raw_cell{i} = struct('data', accel_matrix, 'time', time_vec_raw, 'original_fs', actual_fs);
         actual_fs_list(i) = actual_fs;
         time_offsets(i) = single_offset;
     end
-    
-    % 直接保存原始数据和采样率，不做重采样
-    for i = 1:3
-        data = accel_data_raw_cell{i};
-        time_vec = (0:size(data,1)-1)' / actual_fs_list(i);
-        accel_data_cell{i} = struct('time', time_vec, 'data', data, 'fs', actual_fs_list(i));
-    end
+    fprintf('  正在将所有传感器数据重采样至目标频率 %.1f Hz...\n', target_fs);
+    [accel_data_cell, fs] = resampleToUnifiedTimeBase(accel_data_raw_cell, target_fs);
     
     % 加载力锤数据
     if ~exist(files.force, 'file')
         error('Strict Mode: 找不到力锤文件 %s', files.force);
     end
+    % 直接获取输出，无需预先初始化
     [force_time, force_data] = loadForceXLS(files.force);
     
-    fs = 1000; % 或根据 actual_fs_list 确定
     test_config.data_source = 'AutoLoaded_Strict';
-
 end
 
 
@@ -912,8 +911,9 @@ function H_theory = calculate_theoretical_frf(params_vec, M, freq_vector)
 end
 
 
-function error_vector = calculate_frf_error(params_vec, M, freq_vector, H_exp, Coh_exp)
-    freq_mask = (freq_vector >= 1) & (freq_vector <= 50);
+function error_vector = calculate_frf_error(params_vec, M, freq_vector, H_exp, Coh_exp, freq_range)
+    if nargin < 6, freq_range = [1, 50]; end % 默认值作为防守
+    freq_mask = (freq_vector >= freq_range(1)) & (freq_vector <= freq_range(2));
     H_theory = calculate_theoretical_frf(params_vec, M, freq_vector);
     error_parts = [];
     
@@ -968,7 +968,11 @@ function [raw_accel_matrix, actual_fs, time_offset] = loadSingleSensorCSV(filepa
 
         % 通过解析所有时间戳，以计算总时长
         timestamps_seconds = parseTimestamps(timestamp_strings);
-        
+        [timestamps_seconds, raw_accel_matrix, valid_mask] = cleanTimestamps(timestamps_seconds, raw_accel_matrix);
+        if ~all(valid_mask)
+            fprintf('        已自动清洗异常时间戳数据\n');
+        end
+
         if ~isempty(timestamps_seconds) && length(timestamps_seconds) > 1
             % 获取起始时间偏移量
             time_offset = timestamps_seconds(1);
@@ -1107,7 +1111,7 @@ function identified_params = runIdentificationManual(accel_data_cell, force_data
     fprintf('║  阶段一: 线性基准参数识别 (Linear Baseline Identification)      ║\n');
     fprintf('╚══════════════════════════════════════════════════════════════════╝\n\n');
     
-    linear_params = SAD_Stage1_LinearBaselineIdentification(segments, fs);
+    linear_params = SAD_Stage1_LinearBaselineIdentification(segments, fs, test_config.analysis_params);
     
     if isempty(linear_params) || ~linear_params.valid
         fprintf('  [!] 阶段一失败，无法继续后续阶段。\n');
@@ -2355,267 +2359,6 @@ function segments = assignForceLevels(segments)
     fprintf('    Z方向：径向响应特性（-Z方向激励）\n');
 end
 
-%% ============ 线性参数识别 ============
-function linear_params = identifyLinearParams(segments, fs, varargin)
-% identifyLinearParams - 从锤击实验数据识别线性参数
-%
-% 输入:
-%   segments - 数据段结构体数组
-%   fs       - 采样率 (Hz)
-%   varargin - 可选参数（名-值对）:
-%       'FreqRange'    - 频率分析范围 [min, max] Hz, 默认 [3, 50]
-%       'SNRThreshold' - SNR阈值 (dB), 默认 10
-%       'NFFT'         - FFT点数, 默认 2048
-%       'MassParams'   - 质量参数结构体, 包含 m_root, m_mid, m_tip
-%
-% 输出:
-%   linear_params - 识别出的线性参数结构体
-%
-% 示例:
-%   % 使用默认参数
-%   params = identifyLinearParams(segments, 1000);
-%
-%   % 使用自定义参数
-%   params = identifyLinearParams(segments, 1000, ...
-%       'FreqRange', [5, 60], 'SNRThreshold', 15);
-
-    fprintf('  [2/5] 线性参数识别 (整合高级方法)...\n');
-    
-    %% ====== 解析可选参数 ======
-    p = inputParser;
-    p.addParameter('FreqRange', [3, 50], @(x) isnumeric(x) && length(x)==2);
-    p.addParameter('SNRThreshold', 10, @isnumeric);
-    p.addParameter('NFFT', 2048, @isnumeric);
-    p.addParameter('MassParams', [], @isstruct);
-    p.parse(varargin{:});
-    
-    freq_range = p.Results.FreqRange;
-    SNR_THRESHOLD = p.Results.SNRThreshold;
-    nfft = p.Results.NFFT;
-    mass_params = p.Results.MassParams;
-    
-    fprintf('    [参数配置] 频率范围=[%.1f, %.1f]Hz, SNR阈值=%.1fdB, NFFT=%d\n', ...
-        freq_range(1), freq_range(2), SNR_THRESHOLD, nfft);
-    
-    %% ====== 初始化输出结构 ======
-    linear_params = struct();
-
-    %% ====== 质量过滤：仅使用高SNR数据段 ======
-    high_quality_segments = segments;
-    for i = 1:length(segments)
-        if isfield(segments(i), 'detection_results') && ...
-           isfield(segments(i).detection_results, 'snr')
-            if segments(i).detection_results.snr < SNR_THRESHOLD
-                high_quality_segments(i).force_data_segment = []; % 标记为无效
-            end
-        end
-    end
-    
-    valid_count = sum(arrayfun(@(s) ~isempty(s.force_data_segment), high_quality_segments));
-    fprintf('    [质量过滤] SNR阈值=%.1fdB, 过滤后剩余 %d/%d 段\n', ...
-        SNR_THRESHOLD, valid_count, length(segments));
-    segments = high_quality_segments;
-
-    %% ====== 准备工作: 计算实验FRF矩阵 ======
-    fprintf('    准备工作: 计算实验频响函数 (FRF) 矩阵...\n');
-    
-    % 先检查Z方向有效段数量
-    z_segs = segments(strcmp({segments.direction}, 'Z'));
-    z_valid_count = sum(arrayfun(@(s) isfield(s, 'force_data_segment') && ...
-        ~isempty(s.force_data_segment) && length(s.force_data_segment) > 50, z_segs));
-    fprintf('    [调试] Z方向: 总段数=%d, 有效段数=%d\n', length(z_segs), z_valid_count);
-    
-    [H_exp_x, Coh_x, freq_vector] = calculate_experimental_frf(segments, fs, nfft, 'X');
-    
-    if z_valid_count >= 5
-        [H_exp_z, Coh_z, ~] = calculate_experimental_frf(segments, fs, nfft, 'Z');
-    else
-        fprintf('    [警告] Z方向有效数据不足，将跳过Z方向识别\n');
-        H_exp_z = [];
-        Coh_z = [];
-    end
-    
-    if isempty(freq_vector)
-        warning('未能计算有效的FRF，线性参数识别中止。');
-        return;
-    end
-    
-    linear_params.frequency_vector = freq_vector;
-    linear_params.FRF_matrix_x = H_exp_x;
-    linear_params.coherence_matrix_x = Coh_x;
-    linear_params.FRF_matrix_z = H_exp_z;
-    linear_params.coherence_matrix_z = Coh_z;
-    
-    %% ====== 阶段一: 传统模态分析 ======
-    fprintf('\n    --- 阶段一: 传统模态分析 ---\n');
-    
-    frf_sum_x = abs(H_exp_x(:,1,1)) + abs(H_exp_x(:,2,2)) + abs(H_exp_x(:,3,3));
-    
-    % 【修改点】使用可配置的频率范围，而非硬编码的 3 和 50
-    search_indices = find(freq_vector >= freq_range(1) & freq_vector <= freq_range(2));
-    
-    if isempty(search_indices)
-        warning('频率范围 [%.1f, %.1f] Hz 内无有效数据', freq_range(1), freq_range(2));
-        search_indices = 1:length(freq_vector);
-    end
-    
-    [~, locs_x] = findpeaks(frf_sum_x(search_indices), 'MinPeakProminence', ...
-                            max(frf_sum_x(search_indices))*0.1, 'MinPeakDistance', 0.005);
-    modal_freqs_x = sort(freq_vector(search_indices(locs_x)));
-    
-    if ~isempty(H_exp_z)
-        frf_sum_z = abs(H_exp_z(:,1,1)) + abs(H_exp_z(:,2,2)) + abs(H_exp_z(:,3,3));
-        [~, locs_z] = findpeaks(frf_sum_z(search_indices), 'MinPeakProminence', ...
-            max(frf_sum_z(search_indices))*0.1, 'MinPeakDistance', 0.005);
-        modal_freqs_z = sort(freq_vector(search_indices(locs_z)));
-    else
-        modal_freqs_z = [];
-    end
-    
-    % 估计模态阻尼比
-    damping_estimates_x = [];
-    damping_estimates_z = [];
-    for i = 1:length(segments)
-        seg = segments(i);
-        if isfield(seg, 'signal_data') && length(seg.signal_data) > 50
-            zeta_est = estimateDamping(seg.signal_data, fs);
-            if strcmp(seg.direction, 'X')
-                damping_estimates_x(end+1) = zeta_est;
-            else
-                damping_estimates_z(end+1) = zeta_est;
-            end
-        end
-    end
-    
-    modal_damping_ratios_x = ones(size(modal_freqs_x)) * mean(damping_estimates_x, 'omitnan');
-    modal_damping_ratios_z = ones(size(modal_freqs_z)) * mean(damping_estimates_z, 'omitnan');
-    if isempty(modal_damping_ratios_x) || all(isnan(modal_damping_ratios_x))
-        modal_damping_ratios_x = 0.05*ones(size(modal_freqs_x));
-    end
-    if isempty(modal_damping_ratios_z) || all(isnan(modal_damping_ratios_z))
-        modal_damping_ratios_z = 0.05*ones(size(modal_freqs_z));
-    end
-
-    linear_params.modal_analysis.natural_freqs_x = modal_freqs_x;
-    linear_params.modal_analysis.damping_ratios_x = modal_damping_ratios_x;
-    linear_params.modal_analysis.natural_freqs_z = modal_freqs_z;
-    linear_params.modal_analysis.damping_ratios_z = modal_damping_ratios_z;
-
-    fprintf('    阶段一完成。识别出的模态参数:\n');
-    fprintf('      X方向频率 (Hz): [%s]\n', sprintf('%.2f ', modal_freqs_x));
-    fprintf('      X方向阻尼比:    [%s]\n', sprintf('%.3f ', modal_damping_ratios_x));
-    fprintf('      Z方向频率 (Hz): [%s]\n', sprintf('%.2f ', modal_freqs_z));
-    fprintf('      Z方向阻尼比:    [%s]\n', sprintf('%.3f ', modal_damping_ratios_z));
-
-    % 计算旧版模态刚度（仅供参考）
-    mass_estimate = 1.0;
-    if ~isempty(modal_freqs_x)
-        K_modal_x_est = (2*pi*modal_freqs_x(1))^2 * mass_estimate;
-        C_modal_x_est = 2 * modal_damping_ratios_x(1) * sqrt(K_modal_x_est * mass_estimate);
-        fprintf('    (旧版估算) X方向一阶模态刚度: %.2e N/m, 模态阻尼: %.2e Ns/m\n', ...
-            K_modal_x_est, C_modal_x_est);
-        linear_params.modal_analysis.K_modal_x_est = K_modal_x_est;
-        linear_params.modal_analysis.C_modal_x_est = C_modal_x_est;
-    end
-    
-    %% ====== 阶段二: 物理参数模型修正 ======
-    fprintf('\n    --- 阶段二: 物理参数模型修正 ---\n');
-    
-    % 严格检查质量参数是否传入
-    if ~isempty(mass_params) && isfield(mass_params, 'm_root')
-        m_root = mass_params.m_root;
-        m_mid  = mass_params.m_mid;
-        m_tip  = mass_params.m_tip;
-        fprintf('    [√] 使用预配置的质量参数: Root=%.3f, Mid=%.3f, Tip=%.3f kg\n', m_root, m_mid, m_tip);
-    else
-        error('Analysis:MissingMassParams', ...
-              ['错误：参数识别函数未接收到有效的质量参数 (MassParams)。\n' ...
-               '物理参数识别需要已知质量矩阵(M)才能反解刚度(K)。\n' ...
-               '请确保在 GUI 配置中正确填写了分枝质量，并通过 ConfigAdapter 传递给了此函数。']);
-    end
-    
-    M = diag([m_root, m_mid, m_tip]);
-    fprintf('    质量参数: m_root=%.2f kg, m_mid=%.2f kg, m_tip=%.2f kg\n', ...
-        m_root, m_mid, m_tip);
-    
-    % 基于实验频率生成初始值和边界
-    fprintf('    使用阶段一结果生成优化初始值...\n');
-    [x0_x, lb, ub] = estimate_initial_guess_from_modal(modal_freqs_x, modal_damping_ratios_x, M);
-    [x0_z, ~, ~] = estimate_initial_guess_from_modal(modal_freqs_z, modal_damping_ratios_z, M);
-    
-    % 添加线性不等式约束 k_rm > k_mt
-    % x = [k_g, c_g, k_rm, c_rm, k_mt, c_mt]
-    % 约束: k_mt < k_rm → -k_rm + k_mt < 0
-    A = [0, 0, -1, 0, 1, 0];  % -k_rm + k_mt
-    b = 0;
-    
-    options_con = optimoptions('fmincon', 'Display', 'iter', ...
-        'MaxFunctionEvaluations', 3000, 'StepTolerance', 1e-9, ...
-        'OptimalityTolerance', 1e-9, 'Algorithm', 'interior-point');
-    
-    fprintf('    开始辨识 X 方向物理参数...\n');
-    objective_x_scalar = @(x) norm(calculate_frf_error(x, M, freq_vector, H_exp_x, Coh_x));
-    identified_params_x = fmincon(objective_x_scalar, x0_x, A, b, [], [], lb, ub, [], options_con);
-    
-    % Z方向识别（如果有有效数据）
-    if ~isempty(H_exp_z) && z_valid_count >= 5
-        fprintf('    开始辨识 Z 方向物理参数...\n');
-        objective_z_scalar = @(x) norm(calculate_frf_error(x, M, freq_vector, H_exp_z, Coh_z));
-        identified_params_z = fmincon(objective_z_scalar, x0_z, A, b, [], [], lb, ub, [], options_con);
-    else
-        error('SAD:InsufficientData', ...
-              'Z方向有效实验数据不足（少于5组有效段或FRF无效），无法进行物理参数辨识，\n严禁使用初始猜测值代替。请补充Z方向实验数据。');
-    end
-
-    fprintf('    阶段二完成。\n');
-    
-    %% ====== 保存结果 ======
-    linear_params.physical_parameters.M = M;
-    linear_params.physical_parameters.x_vector_x = identified_params_x;
-    linear_params.physical_parameters.x_vector_z = identified_params_z;
-    
-    [linear_params.physical_parameters.K_x, linear_params.physical_parameters.C_x] = ...
-        build_matrices(identified_params_x);
-    [linear_params.physical_parameters.K_z, linear_params.physical_parameters.C_z] = ...
-        build_matrices(identified_params_z);
-    
-    linear_params.M = M;
-    linear_params.K = linear_params.physical_parameters.K_x;
-    linear_params.C = linear_params.physical_parameters.C_x;
-    
-    [~, D_x] = eig(linear_params.physical_parameters.K_x, M);
-    linear_params.natural_freqs_x = sort(sqrt(diag(D_x)) / (2*pi));
-    [~, D_z] = eig(linear_params.physical_parameters.K_z, M);
-    linear_params.natural_freqs_z = sort(sqrt(diag(D_z)) / (2*pi));
-    linear_params.damping_ratios_x = modal_damping_ratios_x;
-    linear_params.damping_ratios_z = modal_damping_ratios_z;
-
-    %% ====== 输出最终结果 ======
-    fprintf('\n==================== 最终辨识出的物理参数 (可用于仿真代码) ====================\n');
-    fprintf('---- X 方向 ----\n');
-    fprintf('  连接地面 (k_g, c_g)    : k = %.3e N/m,   c = %.3e Ns/m\n', ...
-        identified_params_x(1), identified_params_x(2));
-    fprintf('  连接 Root-Mid (k_rm, c_rm): k = %.3e N/m,   c = %.3e Ns/m\n', ...
-        identified_params_x(3), identified_params_x(4));
-    fprintf('  连接 Mid-Tip (k_mt, c_mt) : k = %.3e N/m,   c = %.3e Ns/m\n', ...
-        identified_params_x(5), identified_params_x(6));
-    fprintf('---- Z 方向 ----\n');
-    fprintf('  连接地面 (k_g, c_g)    : k = %.3e N/m,   c = %.3e Ns/m\n', ...
-        identified_params_z(1), identified_params_z(2));
-    fprintf('  连接 Root-Mid (k_rm, c_rm): k = %.3e N/m,   c = %.3e Ns/m\n', ...
-        identified_params_z(3), identified_params_z(4));
-    fprintf('  连接 Mid-Tip (k_mt, c_mt) : k = %.3e N/m,   c = %.3e Ns/m\n', ...
-        identified_params_z(5), identified_params_z(6));
-    fprintf('=================================================================================\n');
-    
-    fprintf('\n--- 验证: 最终模型频率 vs 实验测量频率 ---\n');
-    fprintf('  实验测量 (X): [%s]\n', sprintf('%.2f ', linear_params.modal_analysis.natural_freqs_x));
-    fprintf('  模型预测 (X): [%s]\n', sprintf('%.2f ', linear_params.natural_freqs_x));
-    fprintf('  实验测量 (Z): [%s]\n', sprintf('%.2f ', linear_params.modal_analysis.natural_freqs_z));
-    fprintf('  模型预测 (Z): [%s]\n', sprintf('%.2f ', linear_params.natural_freqs_z));
-    fprintf('--------------------------------------------\n\n');
-end
-
 %% ============ 非线性特征提取 ============
 function nl_features = extractNonlinearFeatures(segments, fs)
     % 功能：提取非线性特征（严格质量控制）
@@ -2995,11 +2738,20 @@ function validation = validateParameters(params, segments)
     
     fprintf('    [交叉验证] 开始5折交叉验证...\n');
     
+    % [新增] 从 params 中提取 analysis_params，用于传递给训练函数
+    if isfield(params, 'test_config') && isfield(params.test_config, 'analysis_params')
+        analysis_params = params.test_config.analysis_params;
+    else
+        % 后备默认值，防止报错
+        warning('未找到 analysis_params，使用默认配置进行验证');
+        analysis_params = struct('freq_range', [1, 50]);
+    end
+
     fprintf('    验证X方向...\n');
-    [errors_x, details_x] = validateDirection(params, segments, 'X', 2, 5); % 最后一个参数是折数
+    [errors_x, details_x] = validateDirection(params, segments, 'X', 2, 5, analysis_params); % 倒数第二个参数是折数
     
     fprintf('    验证Z方向...\n');
-    [errors_z, details_z] = validateDirection(params, segments, 'Z', 3, 5);
+    [errors_z, details_z] = validateDirection(params, segments, 'Z', 3, 5, analysis_params);
     
     validation.errors_x = errors_x;
     validation.errors_z = errors_z;
@@ -3027,7 +2779,7 @@ function validation = validateParameters(params, segments)
     fprintf('    ------------------------------------------\n');
 end
 
-function [errors, details] = validateDirection(params, all_segments, direction, dir_idx, n_folds)
+function [errors, details] = validateDirection(params, all_segments, direction, dir_idx, n_folds, analysis_params)
     % --- 核心修正：实现K-折交叉验证 ---
     
     dir_segments = all_segments(strcmp({all_segments.direction}, direction));
@@ -3055,7 +2807,7 @@ function [errors, details] = validateDirection(params, all_segments, direction, 
         test_segs = dir_segments(test_indices);
         
         % 1. **仅使用训练集**重新训练模型
-        params_fold = trainModelForCV(train_segs, params.fs);
+        params_fold = trainModelForCV(train_segs, params.fs, analysis_params);
         
         % 2. 在测试集上评估
         fold_error = 0;
@@ -3094,17 +2846,20 @@ function [errors, details] = validateDirection(params, all_segments, direction, 
     errors = errors(~isnan(errors)); % 移除无效折的误差
 end
 
-function params_cv = trainModelForCV(train_segments, fs)
+function params_cv = trainModelForCV(train_segments, fs, analysis_params)
     % 功能：交叉验证中训练模型
     
     params_cv = struct();
     
     % 线性参数识别
-    linear_params = identifyLinearParams(train_segments, fs);
+    linear_params = SAD_Stage1_LinearBaselineIdentification(train_segments, fs, analysis_params);
     
     % 检查线性识别是否成功
     if isempty(linear_params) || ~isfield(linear_params, 'identified_params_x')
-        error('Identify:CVFailed', '交叉验证阶段线性参数识别失败。严禁使用默认值回退，请检查数据质量。');
+        % 对于交叉验证中的个别失败，由外层处理，这里给出一个警告即可
+        warning('Identify:CVFailed', '交叉验证子集中线性参数识别失败。');
+        params_cv = []; % 返回空，外层会处理 NaN
+        return;
     end
     
     params_cv.linear = linear_params;
@@ -3305,7 +3060,8 @@ function generateAnalysisReport(params)
         
         if error_percent < 10, class_str = 'good'; quality_str = '优秀';
         elseif error_percent < 20, class_str = 'warning'; quality_str = '良好';
-        else, class_str = 'bad'; quality_str = '需改进'; end
+        else, class_str = 'bad'; quality_str = '需改进'; 
+        end
         
         fprintf(fid, '<p>平均交叉验证误差: <span class="%s">%.2f%% &pm; %.2f%%</span></p>\n', class_str, error_percent, std_percent);
         fprintf(fid, '<p>参数可靠性评级: <span class="%s">%s</span></p>\n', class_str, quality_str);
@@ -4454,132 +4210,89 @@ function visualizeTimeFrequencyAnalysis(segments, fs)
     fprintf('  [诊断] 分类平均时频特性分析完成。\n');
 end
 
-function [x0, lb, ub] = estimate_initial_guess_from_modal(modal_freqs, modal_damping_ratios, M)
-    % 基于阶段一识别的模态频率，计算合理的初始值和边界
-    % 针对轻质分枝（总质量约60g）优化
-    
-    if ~isempty(modal_freqs)
-        omega1 = 2 * pi * modal_freqs(1);  % 第一阶角频率
-        zeta1 = modal_damping_ratios(1);   % 第一阶阻尼比
-        
-        % 使用系统总质量作为参考
-        m_total = sum(diag(M));  % 约0.06 kg
-        
-        % 从第一阶频率反推典型刚度
-        % 对于f1≈7Hz, m=0.06kg: k_ref ≈ (2π*7)^2 * 0.06 ≈ 115 N/m
-        k_ref = omega1^2 * m_total;
-        c_ref = 2 * zeta1 * omega1 * m_total;
-        
-        fprintf('    [参数推算] f1=%.2f Hz, m_total=%.3f kg → k_ref=%.1f N/m, c_ref=%.3f Ns/m\n', ...
-            modal_freqs(1), m_total, k_ref, c_ref);
-        
-        % 初始值：基于轻质分枝特性
-        % 轻质分枝：刚度小（几十到几百N/m），阻尼很小（0.1-1 Ns/m）
-        x0 = [
-            k_ref * 0.35,   ... k_g ≈ 40 N/m（接地柔性连接）
-            c_ref * 0.4,    ... c_g ≈ 0.05 Ns/m
-            k_ref * 1.3,    ... k_rm ≈ 150 N/m（根部段，最粗）
-            c_ref * 1.0,    ... c_rm ≈ 0.25 Ns/m
-            k_ref * 0.9,    ... k_mt ≈ 100 N/m（顶部段，较细）
-            c_ref * 0.8     ... c_mt ≈ 0.2 Ns/m
-        ];
-        
-        % 边界：针对轻质分枝设置合理范围
-        lb = [
-            k_ref * 0.05,   ... k_g: 6-200 N/m
-            c_ref * 0.05,   ... c_g: 0.01-2 Ns/m
-            k_ref * 0.2,    ... k_rm: 23-650 N/m
-            c_ref * 0.2,    ... c_rm: 0.05-2.5 Ns/m
-            k_ref * 0.2,    ... k_mt: 23-650 N/m
-            c_ref * 0.2     ... c_mt: 0.05-2.5 Ns/m
-        ];
-        
-        ub = [
-            k_ref * 1.8,    ... k_g上界
-            c_ref * 8,      ... c_g上界
-            k_ref * 6,      ... k_rm上界
-            c_ref * 10,     ... c_rm上界
-            k_ref * 6,      ... k_mt上界
-            c_ref * 10      ... c_mt上界
-        ];
-        
-        fprintf('    [边界设置] k范围: [%.0f, %.0f] N/m, c范围: [%.2f, %.2f] Ns/m\n', ...
-            min(lb([1,3,5])), max(ub([1,3,5])), min(lb([2,4,6])), max(ub([2,4,6])));
-        
-    else
-        % 如果无法提取模态频率，直接报错，禁止瞎猜
-        error('Analysis:ModalExtractionFailed', ...
-              ['严重错误：无法从实验数据的频响函数(FRF)中提取有效的模态频率。\n' ...
-               '无法计算物理参数优化的初始猜测值(x0)。\n' ...
-               '可能原因：\n' ...
-               '1. 实验数据信噪比过低，导致 FRF 峰值不明显。\n' ...
-               '2. 频率分析范围 (freq_range) 设置不当，未覆盖共振区。\n' ...
-               '请重新检查数据标注或调整信号处理参数。']);
-    end
-    
-    % 安全检查：确保初始值在边界内
-    x0 = max(x0, lb);
-    x0 = min(x0, ub);
-end
 
-function [H_exp, Coh, freq] = calculate_experimental_frf(segments, fs, nfft, direction)
-    % 功能：计算实验FRF矩阵
+function [H_exp, Coh, freq] = calculate_experimental_frf(...
+    segments, fs, nfft, direction, coh_threshold)
+    % 增强版实验FRF计算
+    %
+    % 根据V3手稿2.3.1节:
+    % "采用H1估计法计算频率响应函数(FRF)"
+    % "引入相干函数γ²作为一致性检验指标，严格剔除相干值低于阈值的频段数据"
+    %
+    % 输入:
+    %   segments      - 信号段数组
+    %   fs            - 采样率
+    %   nfft          - FFT点数
+    %   direction     - 方向 ('X' 或 'Z')
+    %   coh_threshold - 相干函数阈值
+    %
+    % 输出:
+    %   H_exp - FRF矩阵 [n_freq x 3 x 3]
+    %   Coh   - 相干函数矩阵
+    %   freq  - 频率向量
     
-    H_exp = zeros(nfft/2 + 1, 3, 3);
-    Coh = zeros(nfft/2 + 1, 3, 3);
-    freq = [];
+    n_freq = nfft/2 + 1;
+    H_exp = zeros(n_freq, 3, 3);
+    Coh = zeros(n_freq, 3, 3);
+    freq = (0:n_freq-1)' * fs / nfft;
     
-    quality_count = zeros(3,3);
-
-    for i_response = 1:3
-        for j_excitation = 1:3
+    % 窗函数设置 (根据V3手稿)
+    % "对力信号施加力窗(Force Window)以滤除冲击后的噪声"
+    % "对加速度响应信号施加指数窗(Exponential Window)以防止时域截断导致的频谱泄漏"
+    
+    for i_response = 1:3  % 响应点: Root, Mid, Tip
+        for j_excitation = 1:3  % 激励点: Root, Mid, Tip
+            
+            % 筛选相关信号段
             relevant_segs = segments(...
                 [segments.impact_location] == j_excitation & ...
                 [segments.sensor_idx] == i_response & ...
                 strcmp({segments.direction}, direction));
             
-            if isempty(relevant_segs), continue; end
-
-            % SNR阈值降至8dB
+            if isempty(relevant_segs)
+                continue;
+            end
+            
+            % 质量筛选: SNR > 10dB
             valid_segs = relevant_segs(arrayfun(@(s) ...
-                ~isempty(s.force_data_segment) && ...
                 isfield(s, 'detection_results') && ...
-                s.detection_results.snr > 8, relevant_segs));
+                s.detection_results.snr > 10, relevant_segs));
             
-            quality_count(i_response, j_excitation) = length(valid_segs);
-            
-            % 最少1个段即可
             if length(valid_segs) < 1
                 continue;
             end
-
-            num_segs = length(relevant_segs);
-            accel_all = cell(1, num_segs);
-            force_all = cell(1, num_segs);
-            valid_count = 0;
-            for k = 1:num_segs
-                if ~isempty(relevant_segs(k).force_data_segment)
-                    valid_count = valid_count + 1;
-                    accel_all{valid_count} = relevant_segs(k).signal_data;
-                    force_all{valid_count} = relevant_segs(k).force_data_segment;
+            
+            % 收集所有有效段的力和加速度数据
+            accel_all = {};
+            force_all = {};
+            
+            for k = 1:length(valid_segs)
+                seg = valid_segs(k);
+                if ~isempty(seg.force_data_segment) && ~isempty(seg.signal_data)
+                    % 应用窗函数
+                    accel_windowed = applyExponentialWindow(seg.signal_data, fs);
+                    force_windowed = applyForceWindow(seg.force_data_segment);
+                    
+                    accel_all{end+1} = accel_windowed;
+                    force_all{end+1} = force_windowed;
                 end
             end
             
-            if valid_count == 0, continue; end
-            accel_all = accel_all(1:valid_count);
-            force_all = force_all(1:valid_count);
-
-            % 计算平均FRF
-            [H_avg, C_avg, f_vec] = avg_tfestimate(force_all, accel_all, nfft, fs);
-            if isempty(freq), freq = f_vec; end
+            if isempty(accel_all)
+                continue;
+            end
             
-            H_exp(:, i_response, j_excitation) = H_avg;
-            Coh(:, i_response, j_excitation) = C_avg;
+            % 使用线性平均计算FRF (V3手稿: "5次线性平均")
+            [H_avg, C_avg, f_vec] = computeAveragedFRF(force_all, accel_all, nfft, fs);
+            
+            if ~isempty(H_avg)
+                H_exp(:, i_response, j_excitation) = H_avg;
+                Coh(:, i_response, j_excitation) = C_avg;
+            end
         end
     end
-    fprintf('    [FRF质量] %s方向各通道有效段数:\n', direction);
-    disp(quality_count);
 end
+
 
 function setKeepView(state)
     global g_annotation_data;
@@ -4590,7 +4303,7 @@ end
 %% 【新增】阶段一: 线性基准参数识别
 %% =====================================================================
 
-function linear_params = SAD_Stage1_LinearBaselineIdentification(segments, fs)
+function linear_params = SAD_Stage1_LinearBaselineIdentification(segments, fs, analysis_params)
     % SAD阶段一: 线性基准参数识别
     % 
     % 基于FRF矩阵和有理分式多项式法(RFP)进行模态参数识别
@@ -4608,9 +4321,14 @@ function linear_params = SAD_Stage1_LinearBaselineIdentification(segments, fs)
     linear_params.valid = false;
     
     % FFT参数设置
-    nfft = 2048;
-    freq_range = [1, 50];  % 关注频率范围 (Hz)
-    coherence_threshold = 0.80;  % V3手稿要求 0.95，实际可适当放宽
+    nfft = analysis_params.nfft;
+    % 获取频率范围
+    if isfield(analysis_params, 'freq_range')
+        freq_range = analysis_params.freq_range;
+    else
+        freq_range = [1, 50]; % 默认
+    end
+    coherence_threshold = 0.80;  
     
     %% 1.1 分方向计算实验FRF矩阵
     directions = {'X', 'Z'};
@@ -4625,7 +4343,7 @@ function linear_params = SAD_Stage1_LinearBaselineIdentification(segments, fs)
         fprintf('    计算 %s 方向 FRF...\n', dir_name);
         
         % 计算3x3 FRF矩阵 (3响应点 x 3激励点)
-        [H_exp, Coh, freq] = calculate_experimental_frf_enhanced(...
+        [H_exp, Coh, freq] = calculate_experimental_frf(...
             segments, fs, nfft, dir_name, coherence_threshold);
         
         FRF_data.(dir_name).H = H_exp;
@@ -4673,33 +4391,79 @@ function linear_params = SAD_Stage1_LinearBaselineIdentification(segments, fs)
         end
     end
     
-    %% 1.3 物理参数反演 - 从模态空间映射到物理空间
-    fprintf('  [1.3] 物理参数反演...\n');
+   %% 1.3 物理参数反演与优化
+    fprintf('  [1.3] 物理参数反演与优化...\n');
     
-    % 定义等效质量 (基于实测或估算)
+    % 定义等效质量
     M_eq = defineEquivalentMassMatrix();
     linear_params.M = M_eq;
     
-    % X方向参数识别
+    % 准备优化设置
+    % 约束: k_mt < k_rm (假设末端刚度小于根部) -> -k_rm + k_mt < 0
+    A = [0, 0, -1, 0, 1, 0]; b = 0;
+    options_con = optimoptions('fmincon', 'Display', 'off', ...
+        'MaxFunctionEvaluations', 3000, 'StepTolerance', 1e-9, ...
+        'OptimalityTolerance', 1e-9, 'Algorithm', 'interior-point');
+
+    % --- X 方向优化 ---
     if ~isempty(linear_params.natural_freqs_x)
-        [K_x, C_x, params_x] = computePhysicalParameters(...
-            linear_params.natural_freqs_x, ...
-            linear_params.damping_ratios_x, ...
-            M_eq, 'X');
+        % 1. 初步估算 (作为 fmincon 的 x0)
+        [~, ~, x0_x_vec] = computePhysicalParameters(...
+            linear_params.natural_freqs_x, linear_params.damping_ratios_x, M_eq, 'X');
+        
+        % 2. 执行优化 (基于 FRF 误差)
+        if isfield(FRF_data, 'X') && ~isempty(FRF_data.X.H)
+            fprintf('      正在优化 X 方向物理参数...\n');
+            H_exp_x = FRF_data.X.H; Coh_x = FRF_data.X.Coherence; freq_vec = FRF_data.X.freq;
+            
+            % 定义边界 (基于 x0 适当放宽)
+            lb = x0_x_vec * 0.2; ub = x0_x_vec * 5.0;
+            
+            obj_fun_x = @(x) norm(calculate_frf_error(x, M_eq, freq_vec, H_exp_x, Coh_x, freq_range));
+            
+            try
+                identified_params_x = fmincon(obj_fun_x, x0_x_vec, A, b, [], [], lb, ub, [], options_con);
+            catch
+                fprintf('      [警告] X方向优化失败，使用初始估算值。\n');
+                identified_params_x = x0_x_vec;
+            end
+        else
+            identified_params_x = x0_x_vec;
+        end
+        
+        % 3. 重构矩阵
+        [K_x, C_x] = build_matrices(identified_params_x);
         linear_params.K_x = K_x;
         linear_params.C_x = C_x;
-        linear_params.identified_params_x = params_x;
+        linear_params.identified_params_x = identified_params_x;
     end
     
-    % Z方向参数识别
+    % --- Z 方向优化 (同理) ---
     if ~isempty(linear_params.natural_freqs_z)
-        [K_z, C_z, params_z] = computePhysicalParameters(...
-            linear_params.natural_freqs_z, ...
-            linear_params.damping_ratios_z, ...
-            M_eq, 'Z');
+        [~, ~, x0_z_vec] = computePhysicalParameters(...
+            linear_params.natural_freqs_z, linear_params.damping_ratios_z, M_eq, 'Z');
+            
+        if isfield(FRF_data, 'Z') && ~isempty(FRF_data.Z.H)
+            fprintf('      正在优化 Z 方向物理参数...\n');
+            H_exp_z = FRF_data.Z.H; Coh_z = FRF_data.Z.Coherence; freq_vec = FRF_data.Z.freq;
+            
+            lb = x0_z_vec * 0.2; ub = x0_z_vec * 5.0;
+            obj_fun_z = @(x) norm(calculate_frf_error(x, M_eq, freq_vec, H_exp_z, Coh_z, freq_range));
+            
+            try
+                identified_params_z = fmincon(obj_fun_z, x0_z_vec, A, b, [], [], lb, ub, [], options_con);
+            catch
+                fprintf('      [警告] Z方向优化失败，使用初始估算值。\n');
+                identified_params_z = x0_z_vec;
+            end
+        else
+            identified_params_z = x0_z_vec;
+        end
+        
+        [K_z, C_z] = build_matrices(identified_params_z);
         linear_params.K_z = K_z;
         linear_params.C_z = C_z;
-        linear_params.identified_params_z = params_z;
+        linear_params.identified_params_z = identified_params_z;
     end
     
     %% 1.4 汇总为全局矩阵
@@ -4795,6 +4559,19 @@ function linear_params = SAD_Stage1_LinearBaselineIdentification(segments, fs)
     fprintf('    最终递减因子: k=[%.4f, %.4f, %.4f], c=[%.4f, %.4f, %.4f]\n', ...
             linear_params.taper_factors.k(1), linear_params.taper_factors.k(2), linear_params.taper_factors.k(3), ...
             linear_params.taper_factors.c(1), linear_params.taper_factors.c(2), linear_params.taper_factors.c(3));
+    
+    if isfield(FRF_data, 'X')
+        linear_params.FRF_matrix_x = FRF_data.X.H;
+        linear_params.coherence_matrix_x = FRF_data.X.Coherence;
+    end
+    if isfield(FRF_data, 'Z')
+        linear_params.FRF_matrix_z = FRF_data.Z.H;
+        linear_params.coherence_matrix_z = FRF_data.Z.Coherence;
+    end
+    % 统一频率向量 (假设X和Z方向频率轴一致)
+    if isfield(FRF_data, 'X'), linear_params.frequency_vector = FRF_data.X.freq;
+    elseif isfield(FRF_data, 'Z'), linear_params.frequency_vector = FRF_data.Z.freq;
+    end
 
     linear_params.valid = true;
     
@@ -5001,92 +4778,6 @@ function [natural_freqs, damping_ratios, mode_shapes] = extractModalParametersPe
     end
 end
 
-
-%% =====================================================================
-%% 【新增】增强版FRF计算函数
-%% =====================================================================
-
-function [H_exp, Coh, freq] = calculate_experimental_frf_enhanced(...
-    segments, fs, nfft, direction, coh_threshold)
-    % 增强版实验FRF计算
-    %
-    % 根据V3手稿2.3.1节:
-    % "采用H1估计法计算频率响应函数(FRF)"
-    % "引入相干函数γ²作为一致性检验指标，严格剔除相干值低于阈值的频段数据"
-    %
-    % 输入:
-    %   segments      - 信号段数组
-    %   fs            - 采样率
-    %   nfft          - FFT点数
-    %   direction     - 方向 ('X' 或 'Z')
-    %   coh_threshold - 相干函数阈值
-    %
-    % 输出:
-    %   H_exp - FRF矩阵 [n_freq x 3 x 3]
-    %   Coh   - 相干函数矩阵
-    %   freq  - 频率向量
-    
-    n_freq = nfft/2 + 1;
-    H_exp = zeros(n_freq, 3, 3);
-    Coh = zeros(n_freq, 3, 3);
-    freq = (0:n_freq-1)' * fs / nfft;
-    
-    % 窗函数设置 (根据V3手稿)
-    % "对力信号施加力窗(Force Window)以滤除冲击后的噪声"
-    % "对加速度响应信号施加指数窗(Exponential Window)以防止时域截断导致的频谱泄漏"
-    
-    for i_response = 1:3  % 响应点: Root, Mid, Tip
-        for j_excitation = 1:3  % 激励点: Root, Mid, Tip
-            
-            % 筛选相关信号段
-            relevant_segs = segments(...
-                [segments.impact_location] == j_excitation & ...
-                [segments.sensor_idx] == i_response & ...
-                strcmp({segments.direction}, direction));
-            
-            if isempty(relevant_segs)
-                continue;
-            end
-            
-            % 质量筛选: SNR > 10dB
-            valid_segs = relevant_segs(arrayfun(@(s) ...
-                isfield(s, 'detection_results') && ...
-                s.detection_results.snr > 10, relevant_segs));
-            
-            if length(valid_segs) < 1
-                continue;
-            end
-            
-            % 收集所有有效段的力和加速度数据
-            accel_all = {};
-            force_all = {};
-            
-            for k = 1:length(valid_segs)
-                seg = valid_segs(k);
-                if ~isempty(seg.force_data_segment) && ~isempty(seg.signal_data)
-                    % 应用窗函数
-                    accel_windowed = applyExponentialWindow(seg.signal_data, fs);
-                    force_windowed = applyForceWindow(seg.force_data_segment);
-                    
-                    accel_all{end+1} = accel_windowed;
-                    force_all{end+1} = force_windowed;
-                end
-            end
-            
-            if isempty(accel_all)
-                continue;
-            end
-            
-            % 使用线性平均计算FRF (V3手稿: "5次线性平均")
-            [H_avg, C_avg, f_vec] = computeAveragedFRF(force_all, accel_all, nfft, fs);
-            
-            if ~isempty(H_avg)
-                H_exp(:, i_response, j_excitation) = H_avg;
-                Coh(:, i_response, j_excitation) = C_avg;
-            end
-        end
-    end
-end
 
 
 %% =====================================================================

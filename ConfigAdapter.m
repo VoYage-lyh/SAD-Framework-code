@@ -8,13 +8,6 @@ function [analysis_params, sim_params] = ConfigAdapter(preConfig, identifiedPara
 % 输出：
 %   analysis_params: 用于参数识别代码的参数
 %   sim_params: 用于仿真代码的参数（包含识别结果）
-%
-% 使用示例：
-%   % 第一阶段：仅用于参数识别
-%   [analysis_params, ~] = ConfigAdapter_v2(preConfig, []);
-%
-%   % 第二阶段：用于仿真（带识别结果）
-%   [~, sim_params] = ConfigAdapter_v2(preConfig, identifiedParams);
 
     if nargin < 2
         identifiedParams = [];
@@ -45,6 +38,7 @@ function [analysis_params, sim_params] = ConfigAdapter(preConfig, identifiedPara
     sim_params = struct();
     
     % 基础设置
+    sim_params.parallel_execution_max_workers = preConfig.basic.parallel_max_workers;
     sim_params.workFolder = preConfig.basic.workFolder;
     sim_params.model_name = preConfig.basic.modelName;
     sim_params.gravity_g = preConfig.basic.gravity_g;
@@ -63,7 +57,13 @@ function [analysis_params, sim_params] = ConfigAdapter(preConfig, identifiedPara
     sim_params.fruit_config.attach_secondary_tip = preConfig.fruit.attach_secondary_tip;
     sim_params.fruit_config.attach_tertiary_mid = preConfig.fruit.attach_tertiary_mid;
     sim_params.fruit_config.attach_tertiary_tip = preConfig.fruit.attach_tertiary_tip;
-    sim_params.fruit_config.fruits_per_node = 1;
+    
+    % [修复] 使用 GUI 配置的每节点果实数量，移除硬编码
+    if isfield(preConfig.fruit, 'fruits_per_node')
+        sim_params.fruit_config.fruits_per_node = preConfig.fruit.fruits_per_node;
+    else
+        sim_params.fruit_config.fruits_per_node = 1;
+    end
     
     % 生成默认果实参数 (用于未特定指明位置的果实)
     sim_params.default_fruit_params = buildFruitParamsStrict(preConfig, identifiedParams);
@@ -71,11 +71,25 @@ function [analysis_params, sim_params] = ConfigAdapter(preConfig, identifiedPara
     % 激励参数
     sim_params.excitation = preConfig.excitation;
     
-    % 更新激励频率为第一阶固有频率
-    if isfield(identifiedParams, 'linear') && ...
-       isfield(identifiedParams.linear, 'natural_freqs_x') && ...
-       ~isempty(identifiedParams.linear.natural_freqs_x)
-        sim_params.excitation.frequency_hz = identifiedParams.linear.natural_freqs_x(1);
+    % [修复] 更新激励频率为第一阶固有频率 (优先从Trunk获取，适配聚合结构体)
+    found_freq = false;
+    if isfield(identifiedParams, 'branches') && isfield(identifiedParams.branches, 'Trunk') && ...
+       isfield(identifiedParams.branches.Trunk, 'linear') && ...
+       isfield(identifiedParams.branches.Trunk.linear, 'natural_freqs_x')
+        freqs = identifiedParams.branches.Trunk.linear.natural_freqs_x;
+        if ~isempty(freqs)
+            sim_params.excitation.frequency_hz = freqs(1);
+            found_freq = true;
+        end
+    end
+    
+    % 兼容旧版单一结构体
+    if ~found_freq && isfield(identifiedParams, 'linear') && ...
+       isfield(identifiedParams.linear, 'natural_freqs_x')
+        freqs = identifiedParams.linear.natural_freqs_x;
+        if ~isempty(freqs)
+            sim_params.excitation.frequency_hz = freqs(1);
+        end
     end
 
     % 仿真控制
@@ -103,24 +117,18 @@ function trunk = buildTrunkParams(preConfig, identifiedParams)
     trunk.tip.m = m_total * m_dist(3);
     
     % 刚度和阻尼 (严格来自 实验识别)
-    if ~isfield(identifiedParams, 'linear')
-        error('ConfigAdapter:MissingData', '缺少线性识别参数(linear)，无法构建主干。');
-    end
-    
+    % [修复] 移除顶层 'linear' 强制检查，支持聚合结构体
     
     % 获取刚度递减趋势 (如果有的话，用于节点间微调，否则直接用矩阵对角元)
-    % 这里假设 K 矩阵的对角元分别代表 Root, Mid, Tip 的等效刚度
-    % 刚度和阻尼查找
     target_lin = [];
     if isfield(identifiedParams, 'branches') && isfield(identifiedParams.branches, 'Trunk')
         target_lin = identifiedParams.branches.Trunk.linear;
         fprintf('    主干：使用专属识别参数。\n');
     elseif isfield(identifiedParams, 'linear')
-        % [已删除] 严禁使用全局平均参数
-        error('ConfigAdapter:NoTrunkData', ...
-              '主干 (Trunk) 缺少专属的实验识别数据。\n无法构建模型。请进行主干的参数识别。');
+        target_lin = identifiedParams.linear;
+        fprintf('    主干：使用全局线性参数。\n');
     else
-        error('ConfigAdapter:NoTrunkParams', '缺少主干参数数据。');
+        error('ConfigAdapter:NoTrunkParams', '缺少主干参数数据。请确保参数识别包含 Trunk 分枝。');
     end
     
     K = target_lin.K;
@@ -217,11 +225,9 @@ function predefined = generatePredefinedParams(preConfig, identifiedParams)
         error('ConfigAdapter:MissingData', '缺少配置或识别参数');
     end
     
-    % 获取递减因子 (必须存在)
-    if ~isfield(identifiedParams.linear, 'taper_factors')
-        error('ConfigAdapter:MissingData', '识别结果中缺少 taper_factors (刚度递减因子)');
-    end
-    identified_taper = identifiedParams.linear.taper_factors;
+    % [修复] 移除此处对 taper_factors 的全局提取
+    % 原因：taper 是在 estimateStiffnessDamping 中针对每个分枝单独计算的
+    % identified_taper = identifiedParams.linear.taper_factors; <--- DELETE
     
     predefined = struct();
     fruitConfig = preConfig.fruit;
@@ -238,17 +244,17 @@ function predefined = generatePredefinedParams(preConfig, identifiedParams)
         geom = type_struct.(name);
         validateBranchGeometry(geom, name);
         
-        % 3. 【修改点】获取基准刚度 AND 专属递减因子
+        % 3. 获取基准刚度 AND 专属递减因子
         % 此时 estimateStiffnessDamping 返回三个值
         [k_b, c_b, specific_taper] = estimateStiffnessDamping(geom, identifiedParams, name);
         
-        % 4. 【修改点】使用专属递减因子生成分段参数
+        % 4. 使用专属递减因子生成分段参数
         % 这样 Root, Mid, Tip 都会精确等于实验识别值
         predefined.(name) = generateBranchSegmentParams(geom, k_b, c_b, specific_taper);
         
         predefined.(name).branch_level = lvl;
         
-        % 5. 挂果逻辑 (保持不变)
+        % 5. 挂果逻辑
         if shouldAttachFruit(name, lvl, fruitConfig)
             if shouldAttachAtPosition(lvl, 'mid', fruitConfig)
                 predefined.(name).fruit_at_mid = buildFruitParamsStrict(preConfig, identifiedParams);
@@ -535,8 +541,6 @@ function validateBranchGeometry(branchGeom, branchName)
     end
 end
 
-% [在文件末尾添加或替换]
-
 function fruit_params = buildFruitParamsStrict(preConfig, identifiedParams)
     % 功能：基于识别出的统计模型生成果实参数
     % 核心原则：严禁使用预设的固定值 (如 F=5N)，必须由模型预测得出
@@ -560,14 +564,13 @@ function fruit_params = buildFruitParamsStrict(preConfig, identifiedParams)
     fruit_params.c_pedicel_y = c_val;
     fruit_params.k_pedicel_z = k_val;
     fruit_params.c_pedicel_z = c_val;
-    
+
     % 2. 核心：计算断裂力 F_break
     % 需要从 identifiedParams 中提取脱落模型
     % 假设所有分枝共享同一个脱落机制模型，我们取第一个有效分枝的模型即可
     det_model = [];
-    if isfield(identifiedParams, 'detachment_model')
-        det_model = identifiedParams.detachment_model;
-    elseif isfield(identifiedParams, 'branches')
+    % [修复] 适配聚合结构体
+    if isfield(identifiedParams, 'branches')
         % 遍历寻找含有 detachment_model 的分枝
         fn = fieldnames(identifiedParams.branches);
         for i = 1:length(fn)
@@ -576,6 +579,8 @@ function fruit_params = buildFruitParamsStrict(preConfig, identifiedParams)
                 break;
             end
         end
+    elseif isfield(identifiedParams, 'detachment_model')
+        det_model = identifiedParams.detachment_model;
     end
     
     if ~isempty(det_model)

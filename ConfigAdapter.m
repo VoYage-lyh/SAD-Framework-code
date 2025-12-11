@@ -104,11 +104,11 @@ end
 function trunk = buildTrunkParams(preConfig, identifiedParams)
     trunk = struct();
     
-    % 几何与质量 (来自 GUI)
+    % --- 几何与质量 (保持不变) ---
     trunk.length = preConfig.trunk.length;
     trunk.diameter_base = preConfig.trunk.diameter_base;
     trunk.diameter_tip = preConfig.trunk.diameter_tip;
-    trunk.z_factor = preConfig.trunk.z_factor;
+    % [移除] trunk.z_factor = preConfig.trunk.z_factor; <--- z_factor 不再来源于配置
     
     m_total = preConfig.trunk.total_mass;
     m_dist = preConfig.trunk.mass_distribution;
@@ -116,51 +116,83 @@ function trunk = buildTrunkParams(preConfig, identifiedParams)
     trunk.mid.m = m_total * m_dist(2);
     trunk.tip.m = m_total * m_dist(3);
     
-    % 刚度和阻尼 (严格来自 实验识别)
-    % [修复] 移除顶层 'linear' 强制检查，支持聚合结构体
+    % --- 刚度和阻尼 (严格数据驱动) ---
     
-    % 获取刚度递减趋势 (如果有的话，用于节点间微调，否则直接用矩阵对角元)
-    target_lin = [];
+    % 1. 定位线性参数源
     if isfield(identifiedParams, 'branches') && isfield(identifiedParams.branches, 'Trunk')
         target_lin = identifiedParams.branches.Trunk.linear;
-        fprintf('    主干：使用专属识别参数。\n');
+        fprintf('    主干：加载 Trunk 分枝识别参数。\n');
     elseif isfield(identifiedParams, 'linear')
         target_lin = identifiedParams.linear;
-        fprintf('    主干：使用全局线性参数。\n');
+        fprintf('    主干：加载全局线性参数。\n');
     else
-        error('ConfigAdapter:NoTrunkParams', '缺少主干参数数据。请确保参数识别包含 Trunk 分枝。');
+        error('ConfigAdapter:NoTrunkParams', ...
+              '错误：未在 identifiedParams 中找到主干(Trunk)或全局(linear)参数。\n请先运行参数识别。');
     end
     
-    K = target_lin.K;
-    C = target_lin.C;
+    % 2. 严格检查 Y 方向物理参数向量 (identified_params_x)
+    % 格式应为: [k_g, c_g, k_rm, c_rm, k_mt, c_mt]
+    if ~isfield(target_lin, 'identified_params_x') || isempty(target_lin.identified_params_x) || length(target_lin.identified_params_x) < 6
+        error('ConfigAdapter:PhysicalParamsMissingY', ...
+              '严重错误：参数识别结果中缺少有效的 Y 方向物理参数向量 "identified_params_x"。');
+    end
+    
+    % 3. 赋值 Y 方向参数 (Y方向 = 主振动方向)
+    p_vec_y = target_lin.identified_params_x;
+    
+    trunk.root.k_y_conn_to_base = p_vec_y(1); % k_g
+    trunk.root.c_y_conn_to_base = p_vec_y(2); % c_g
+    
+    trunk.root.k_y_conn = p_vec_y(3); % k_rm
+    trunk.mid.k_y_conn  = p_vec_y(5); % k_mt
+    trunk.tip.k_y_conn  = 0;        
+    
+    trunk.root.c_y_conn = p_vec_y(4);
+    trunk.mid.c_y_conn  = p_vec_y(6);
+    trunk.tip.c_y_conn  = 0;
 
-    % Y方向 (主振动方向)
-    trunk.root.k_y_conn_to_base = K(1,1); % 根部对地
-    trunk.root.c_y_conn_to_base = C(1,1);
+    fprintf('    [严格模式] Y 方向参数应用: k_g=%.1f, k_rm=%.1f。\n', p_vec_y(1), p_vec_y(3));
+
     
-    trunk.root.k_y_conn = K(1,1); % Root节点连接刚度
-    trunk.mid.k_y_conn  = K(2,2); % Mid节点连接刚度
-    trunk.tip.k_y_conn  = K(3,3); % Tip节点连接刚度
+    % 4. Z 方向参数处理 (强制要求识别结果)
     
-    trunk.root.c_y_conn = C(1,1);
-    trunk.mid.c_y_conn  = C(2,2);
-    trunk.tip.c_y_conn  = C(3,3);
-    
-    % Z方向 (应用几何异向性因子 z_factor)
-    z_fac = trunk.z_factor;
-    
-    trunk.root.k_z_conn_to_base = K(1,1) * z_fac;
-    trunk.root.c_z_conn_to_base = C(1,1) * z_fac;
-    
-    trunk.root.k_z_conn = K(1,1) * z_fac;
-    trunk.mid.k_z_conn  = K(2,2) * z_fac;
-    trunk.tip.k_z_conn  = K(3,3) * z_fac;
-    
-    trunk.root.c_z_conn = C(1,1) * z_fac;
-    trunk.mid.c_z_conn  = C(2,2) * z_fac;
-    trunk.tip.c_z_conn  = C(3,3) * z_fac;
+    if isfield(target_lin, 'identified_params_z') && length(target_lin.identified_params_z) >= 6
+        % Z-A: 使用 Z 方向独立识别参数 (p_vec_z)
+        p_vec_z = target_lin.identified_params_z;
+        fprintf('    [严格模式] 应用 Z 方向独立识别参数。\n');
+        
+        % 4.1 自动计算 z_factor 并记录 (作为识别结果输出)
+        if p_vec_y(1) ~= 0
+            % 基于接地刚度 k_g 计算 z_factor
+            z_fac = p_vec_z(1) / p_vec_y(1); 
+            trunk.z_factor = z_fac; 
+            fprintf('    [自动计算] Z-factor (k_g,z / k_g,y) = %.4f\n', z_fac);
+        else
+            % 特殊情况处理
+            trunk.z_factor = 1.0; 
+            warning('ConfigAdapter:ZeroKG', 'Y方向 k_g 接近零，Z-factor 设为 1.0。');
+        end
+
+        % 4.2 赋值 Z 方向参数
+        trunk.root.k_z_conn_to_base = p_vec_z(1);
+        trunk.root.c_z_conn_to_base = p_vec_z(2);
+        
+        trunk.root.k_z_conn = p_vec_z(3);
+        trunk.mid.k_z_conn  = p_vec_z(5);
+        trunk.tip.k_conn_z  = 0;
+        
+        trunk.root.c_z_conn = p_vec_z(4);
+        trunk.mid.c_z_conn  = p_vec_z(6);
+        trunk.tip.c_z_conn  = 0;
+        
+    else
+        % Z-B: Z方向独立识别参数缺失 -> 报错中断
+        error('ConfigAdapter:NoZParams', ...
+              ['严重错误：缺少 Z 方向识别参数 (identified_params_z)。\n' ...
+               '在严格模式下，Z方向参数必须由数据识别得出，禁止使用估算值或几何因子。\n' ...
+               '请检查分析步骤是否包含 Z 方向识别。']);
+    end
 end
-
 
 %% ==================== 验证预定义参数完整性 ====================
 function validatePredefinedParams(predefined, preConfig)
@@ -512,7 +544,7 @@ end
 function validateBranchGeometry(branchGeom, branchName)
     % 验证分枝几何参数完整性 - 严格模式
     
-    required_fields = {'total_mass', 'length', 'diameter_base', 'diameter_tip', 'mass_dist', 'z_factor'};
+    required_fields = {'total_mass', 'length', 'diameter_base', 'diameter_tip', 'mass_dist'};
     
     for i = 1:length(required_fields)
         field = required_fields{i};

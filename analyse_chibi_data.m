@@ -69,7 +69,7 @@ function identified_params = analyse_chibi_data(analysis_config)
     [accel_data_cell, fs_final] = alignSignalsWithXCorr(accel_data_cell_raw);
     if isempty(accel_data_cell), return; end % 如果对齐失败则退出
     test_config.analysis_params = params;
-    
+
     fprintf('\n========== 数据完整性验证 ==========\n');
     for i = 1:3
         n_samples = length(accel_data_cell{i}.time);
@@ -4374,9 +4374,10 @@ function linear_params = SAD_Stage1_LinearBaselineIdentification(segments, fs, a
             extractModalParametersRFP(H, freq, Coh, freq_range, coherence_threshold);
         
         if isempty(natural_freqs)
-            fprintf('      [!] %s方向未能提取有效模态，使用峰值拾取法\n', dir_name);
-            [natural_freqs, damping_ratios, mode_shapes] = ...
-                extractModalParametersPeakPicking(H, freq, Coh, freq_range);
+            error('SAD:ModalExtractionFailed', ...
+                  ['%s 方向未能通过 RFP 方法提取有效模态。\n' ...
+                   '数据相干性可能过低或信噪比不足。\n' ...
+                   '为了保证仿真精度，系统拒绝使用"峰值拾取法"进行粗略估算。'], dir_name);
         end
         
         % 存储结果
@@ -4422,13 +4423,19 @@ function linear_params = SAD_Stage1_LinearBaselineIdentification(segments, fs, a
             obj_fun_x = @(x) norm(calculate_frf_error(x, M_eq, freq_vec, H_exp_x, Coh_x, freq_range));
             
             try
-                identified_params_x = fmincon(obj_fun_x, x0_x_vec, A, b, [], [], lb, ub, [], options_con);
-            catch
-                fprintf('      [警告] X方向优化失败，使用初始估算值。\n');
-                identified_params_x = x0_x_vec;
+                [identified_params_x, fval, exitflag] = fmincon(obj_fun_x, x0_x_vec, A, b, [], [], lb, ub, [], options_con);
+                
+                if exitflag <= 0
+                    error('SAD:OptimizationFailed', 'X方向物理参数优化未收敛 (ExitFlag=%d)。数据可能不足以支持物理模型反演。', exitflag);
+                end
+            catch ME
+                error('SAD:OptimizationError', ...
+                      ['X方向物理参数识别失败。\n' ...
+                       '错误详情: %s\n' ...
+                       '严禁使用初始估算值替代。请检查FRF数据质量。'], ME.message);
             end
         else
-            identified_params_x = x0_x_vec;
+            error('SAD:MissingData', '缺少X方向FRF数据，无法进行物理参数识别。');
         end
         
         % 3. 重构矩阵
@@ -4451,13 +4458,19 @@ function linear_params = SAD_Stage1_LinearBaselineIdentification(segments, fs, a
             obj_fun_z = @(x) norm(calculate_frf_error(x, M_eq, freq_vec, H_exp_z, Coh_z, freq_range));
             
             try
-                identified_params_z = fmincon(obj_fun_z, x0_z_vec, A, b, [], [], lb, ub, [], options_con);
-            catch
-                fprintf('      [警告] Z方向优化失败，使用初始估算值。\n');
-                identified_params_z = x0_z_vec;
+                [identified_params_z, fval, exitflag] = fmincon(obj_fun_z, x0_z_vec, A, b, [], [], lb, ub, [], options_con);
+                
+                if exitflag <= 0
+                    error('SAD:OptimizationFailed', 'Z方向物理参数优化未收敛 (ExitFlag=%d)。', exitflag);
+                end
+            catch ME
+                error('SAD:OptimizationError', ...
+                      ['Z方向物理参数识别失败。\n' ...
+                       '错误详情: %s\n' ...
+                       '严禁使用初始估算值替代。'], ME.message);
             end
         else
-            identified_params_z = x0_z_vec;
+            error('SAD:MissingData', '缺少Z方向FRF数据，无法识别Z向参数。严格模式下不允许仅基于X方向推算。');
         end
         
         [K_z, C_z] = build_matrices(identified_params_z);

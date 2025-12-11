@@ -141,7 +141,6 @@ function config = getDefaultConfig()
     config.trunk.diameter_base = 0.15;          % 基部直径 (m)
     config.trunk.diameter_tip = 0.08;           % 顶部直径 (m)
     config.trunk.mass_distribution = [0.4, 0.35, 0.25];  % root/mid/tip质量分配
-    config.trunk.z_factor = 1.0;                % Z方向刚度因子
     
     % 根据拓扑结构动态生成分枝参数
     [config.primary, config.secondary, config.tertiary] = generateDefaultBranchParams(...
@@ -362,7 +361,6 @@ function createGeometryMassPanel(parent, config)
         '长度 (m):', 'edit_trunk_length', num2str(config.trunk.length);
         '基部直径 (m):', 'edit_trunk_dBase', num2str(config.trunk.diameter_base);
         '顶部直径 (m):', 'edit_trunk_dTip', num2str(config.trunk.diameter_tip);
-        'Z方向因子:', 'edit_trunk_zfactor', num2str(config.trunk.z_factor);
     };
     
     for i = 1:size(trunkParams, 1)
@@ -891,7 +889,6 @@ function config = collectAllParameters(fig)
         config.trunk.length = getEditValue(fig, 'edit_trunk_length', 'double');
         config.trunk.diameter_base = getEditValue(fig, 'edit_trunk_dBase', 'double');
         config.trunk.diameter_tip = getEditValue(fig, 'edit_trunk_dTip', 'double');
-        config.trunk.z_factor = getEditValue(fig, 'edit_trunk_zfactor', 'double');
         config.trunk.mass_distribution = eval(getEditValue(fig, 'edit_trunk_massDist', 'string'));
         
         % 分枝参数（从表格）
@@ -1026,7 +1023,6 @@ function updateUIFromConfig(fig, config)
     setEditValue(fig, 'edit_trunk_length', num2str(config.trunk.length));
     setEditValue(fig, 'edit_trunk_dBase', num2str(config.trunk.diameter_base));
     setEditValue(fig, 'edit_trunk_dTip', num2str(config.trunk.diameter_tip));
-    setEditValue(fig, 'edit_trunk_zfactor', num2str(config.trunk.z_factor));
     setEditValue(fig, 'edit_trunk_massDist', mat2str(config.trunk.mass_distribution));
     
     % --- 分枝参数表格 ---

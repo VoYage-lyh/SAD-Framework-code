@@ -2881,7 +2881,7 @@ function simulation_results = Build_Extended_MDOF_model(sim_params)
         add_line(logic_subsystem_actual_path, 'Detached_Status_Latch/1', 'Detached_Status_out/1');
         add_line(logic_subsystem_actual_path, 'F_mag_sqrt/1', 'F_pedicel_magnitude_out/1');
     
-        % 6. 【核心修正】使用开关直接切换最终输出的力
+        % 6. 使用开关直接切换最终输出的力
         % 创建一个Constant模块，其值为脱落后作用在Y方向的力，即重力
         add_block('simulink/Sources/Constant', [logic_subsystem_actual_path, '/GravityForce_Y'], ...
               'Value', num2str(-fruit_params.m * gravity_g_val, '%.4g')); % <-- m*g, 注意是负值
@@ -2894,20 +2894,30 @@ function simulation_results = Build_Extended_MDOF_model(sim_params)
         add_line(logic_subsystem_actual_path, 'Detached_Status_Latch/1', 'Switch_Force_Y/2'); % u2: 控制信号
         add_line(logic_subsystem_actual_path, 'Fy_unbroken/1', 'Switch_Force_Y/3');          % u3: 如果未脱落(u2<=0.5)，通过u3 (F_unbroken)
         
+        % Y方向力的开关 (脱落后Y方向不受力)
+        add_block('simulink/Signal Routing/Switch', [logic_subsystem_actual_path, '/Switch_Reaction_Y'], 'Criteria', 'u2 > Threshold', 'Threshold', '0.5', 'Position', [300 160 340 200]);
+        add_line(logic_subsystem_actual_path, 'ZeroForce/1', 'Switch_Reaction_Y/1');        % 脱落: 0
+        add_line(logic_subsystem_actual_path, 'Detached_Status_Latch/1', 'Switch_Reaction_Y/2');
+        add_line(logic_subsystem_actual_path, 'Fy_unbroken/1', 'Switch_Reaction_Y/3');      % 未脱落: 弹簧力
+        
         % Z方向力的开关 (脱落后Z方向不受力)
-        add_block('simulink/Signal Routing/Switch', [logic_subsystem_actual_path, '/Switch_Force_Z'], 'Criteria', 'u2 > Threshold', 'Threshold', '0.5', 'Position', [300 100 340 140]);
-        add_line(logic_subsystem_actual_path, 'ZeroForce/1', 'Switch_Force_Z/1');         % u1: 如果脱落(u2>0.5)，通过u1 (ZeroForce)
-        add_line(logic_subsystem_actual_path, 'Detached_Status_Latch/1', 'Switch_Force_Z/2'); % u2: 控制信号
-        add_line(logic_subsystem_actual_path, 'Fz_unbroken/1', 'Switch_Force_Z/3');         % u3: 如果未脱落(u2<=0.5)，通过u3 (F_unbroken)
+        % Switch_Reaction_Z
+        add_block('simulink/Signal Routing/Switch', [logic_subsystem_actual_path, '/Switch_Reaction_Z'], 'Criteria', 'u2 > Threshold', 'Threshold', '0.5', 'Position', [300 220 340 260]);
+        add_line(logic_subsystem_actual_path, 'ZeroForce/1', 'Switch_Reaction_Z/1');        % 脱落: 0
+        add_line(logic_subsystem_actual_path, 'Detached_Status_Latch/1', 'Switch_Reaction_Z/2');
+        add_line(logic_subsystem_actual_path, 'Fz_unbroken/1', 'Switch_Reaction_Z/3');      % 未脱落: 弹簧力
     
         % 7. 将切换后的最终作用力连接到输出
         add_line(logic_subsystem_actual_path, 'Switch_Force_Y/1', 'F_to_fruit_y_out/1');
         add_line(logic_subsystem_actual_path, 'Switch_Force_Z/1', 'F_to_fruit_z_out/1');
         
         % 8. 计算并连接反作用力
-        add_block('simulink/Commonly Used Blocks/Gain', [logic_subsystem_actual_path, '/Negate_Fy'], 'Gain', '-1'); add_line(logic_subsystem_actual_path, 'Switch_Force_Y/1', 'Negate_Fy/1');
+        add_block('simulink/Commonly Used Blocks/Gain', [logic_subsystem_actual_path, '/Negate_Fy'], 'Gain', '-1'); 
+        add_line(logic_subsystem_actual_path, 'Switch_Reaction_Y/1', 'Negate_Fy/1'); 
         add_line(logic_subsystem_actual_path, 'Negate_Fy/1', 'F_to_tip_y_out/1');
-        add_block('simulink/Commonly Used Blocks/Gain', [logic_subsystem_actual_path, '/Negate_Fz'], 'Gain', '-1'); add_line(logic_subsystem_actual_path, 'Switch_Force_Z/1', 'Negate_Fz/1');
+        
+        add_block('simulink/Commonly Used Blocks/Gain', [logic_subsystem_actual_path, '/Negate_Fz'], 'Gain', '-1'); 
+        add_line(logic_subsystem_actual_path, 'Switch_Reaction_Z/1', 'Negate_Fz/1'); 
         add_line(logic_subsystem_actual_path, 'Negate_Fz/1', 'F_to_tip_z_out/1');
     
         % 自动整理子系统内部布局
@@ -2995,13 +3005,13 @@ function simulation_results = Build_Extended_MDOF_model(sim_params)
         global current_y_level_global; 
         global fruit_signal_manager_global;
     
-        % *** 新增: 获取初始条件映射表 ***
+        % ***  获取初始条件映射表 ***
         ic_map = containers.Map(); % 默认空表
         if isfield(model_build_params_struct, 'initial_conditions')
             ic_map = model_build_params_struct.initial_conditions;
         end
         
-         % *** 核心修正：在此处定义 get_ic_strings 作为嵌套函数 ***
+         % *** 在此处定义 get_ic_strings 作为嵌套函数 ***
         % 这样它就可以访问其父函数 build_branch_recursively 的工作区，特别是 ic_map 变量。
         function [y_ic_str, z_ic_str] = get_ic_strings(mass_id)
             if isKey(ic_map, mass_id)
@@ -3156,10 +3166,7 @@ function simulation_results = Build_Extended_MDOF_model(sim_params)
         root_segment_params = current_branch_params.root;
         root_mass_local_name = matlab.lang.makeValidName([path_id_str_for_names, '_', branch_segment_names{1}, '_Mass']);
         [y_ic_root, z_ic_root] = get_ic_strings(root_mass_local_name); % *** 获取初始条件 ***
-        % *** 新增：健壮性检查 ***
-        if isempty(y_ic_root) || ~ischar(y_ic_root), y_ic_root = '0'; end
-        if isempty(z_ic_root) || ~ischar(z_ic_root), z_ic_root = '0'; end
-        
+                
         segment_mass_paths{1} = create_mass_subsystem_2D(...
             current_branch_subsystem_actual_full_path, ... 
             root_mass_local_name, ...
@@ -3170,7 +3177,7 @@ function simulation_results = Build_Extended_MDOF_model(sim_params)
             [segment_layout_x_start_inside_branch, segment_layout_y_pos_inside_branch, ...
             segment_layout_x_start_inside_branch + layout_params_struct.segment_width, ...
             segment_layout_y_pos_inside_branch + layout_params_struct.segment_height], ...
-            '0', '0' ... % <-- 核心修改点：强制初始条件为0
+            y_ic_root, z_ic_root ... 
         );
     
         if branch_level < 3
@@ -3267,9 +3274,7 @@ function simulation_results = Build_Extended_MDOF_model(sim_params)
         mid_segment_params = current_branch_params.mid;
         mid_mass_local_name = matlab.lang.makeValidName([path_id_str_for_names, '_', branch_segment_names{2}, '_Mass']);
         [y_ic_mid, z_ic_mid] = get_ic_strings(mid_mass_local_name);
-        if isempty(y_ic_mid) || ~ischar(y_ic_mid), y_ic_mid = '0'; end
-        if isempty(z_ic_mid) || ~ischar(z_ic_mid), z_ic_mid = '0'; end
-        
+                
         % ========== 统一果实检测（Mid和Tip一起检测）==========
         % 检测 Mid 位置是否有果实
         has_fruit_at_mid = false;
@@ -3311,7 +3316,7 @@ function simulation_results = Build_Extended_MDOF_model(sim_params)
             [mid_segment_layout_x, segment_layout_y_pos_inside_branch, ...
             mid_segment_layout_x + layout_params_struct.segment_width, ...
             segment_layout_y_pos_inside_branch + layout_params_struct.segment_height], ...
-            '0', '0'...
+            y_ic_mid, z_ic_mid...
         );
     
         if branch_level < 3
@@ -3332,7 +3337,7 @@ function simulation_results = Build_Extended_MDOF_model(sim_params)
             false, false, ...
             layout_params_struct);
     
-        % --- 3.2.1 Mid 位置果实连接（新增）---
+        % --- 3.2.1 Mid 位置果实连接---
         mid_next_available_fconn_idx = 2 + 1;
         
         if has_fruit_at_mid
@@ -3465,9 +3470,7 @@ function simulation_results = Build_Extended_MDOF_model(sim_params)
         tip_segment_params = current_branch_params.tip;
         tip_mass_local_name = matlab.lang.makeValidName([path_id_str_for_names, '_', branch_segment_names{3}, '_Mass']);
         [y_ic_tip, z_ic_tip] = get_ic_strings(tip_mass_local_name); % *** 获取初始条件 ***
-        % *** 新增：健壮性检查 ***
-        if isempty(y_ic_tip) || ~ischar(y_ic_tip), y_ic_tip = '0'; end
-        if isempty(z_ic_tip) || ~ischar(z_ic_tip), z_ic_tip = '0'; end
+        
         num_sub_branches_from_this_tip = 0;
         if branch_level == 0 
             num_sub_branches_from_this_tip = model_build_params_struct.config.num_primary_branches;
@@ -3500,7 +3503,7 @@ function simulation_results = Build_Extended_MDOF_model(sim_params)
             [tip_segment_layout_x, segment_layout_y_pos_inside_branch, ...
             tip_segment_layout_x + layout_params_struct.segment_width, ...
             segment_layout_y_pos_inside_branch + layout_params_struct.segment_height], ...
-            '0', '0' ... % <-- 核心修改点：强制初始条件为0
+            y_ic_tip, z_ic_tip ... 
         );
         
         if branch_level < 3

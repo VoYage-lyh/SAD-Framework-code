@@ -15,7 +15,14 @@ function simulation_results = Build_Extended_MDOF_model(sim_params)
     close all;
     % 清除命令行窗口的显示内容
     clc;
-    clear global;
+    
+    global excitation_targets_global; 
+    global fruit_signal_manager_global; 
+    global current_y_level_global;
+
+    excitation_targets_global = {}; 
+    fruit_signal_manager_global = {}; 
+    current_y_level_global = [];
     disp('=== 脚本初始化完成：已关闭图形窗口、清空工作空间和命令行 ===');
     disp(newline); % 增加空行，使输出更易读
     
@@ -933,14 +940,14 @@ function simulation_results = Build_Extended_MDOF_model(sim_params)
     disp(newline);
     
     % --- 4.4 收集激励目标并创建激励路由 ---
-    % 从全局变量中获取由 build_branch_recursively 收集到的所有可激励目标 (质量块子系统)
-    % 和所有果实相关的信号记录信息。
-    excitation_targets = excitation_targets_global; % 从全局变量中检索激励目标列表
-    all_fruit_signals_info = fruit_signal_manager_global; % 从全局变量中检索果实信号信息
+    % 从共享变量中获取由 build_branch_recursively 收集到的所有可激励目标
     
-    % 清理全局变量 (非常重要，避免在后续脚本执行或多次运行中产生意外的累积效应)
-    clear global excitation_targets_global current_y_level_global fruit_signal_manager_global;
-    disp('已从全局变量中获取激励目标和果实信号信息，并已清理全局变量。');
+    % 直接读取在主函数开头初始化的变量
+    excitation_targets = excitation_targets_global; 
+    all_fruit_signals_info = fruit_signal_manager_global; 
+    
+    disp('已从共享变量中获取激励目标和果实信号信息。');
+    disp(newline);
     
     % 显示收集到的可激励目标数量
     if ~isempty(excitation_targets)
@@ -2981,7 +2988,7 @@ function simulation_results = Build_Extended_MDOF_model(sim_params)
                                               fruit_unique_id, fruit_params, gravity_g_val, ...
                                               tip_F_react_conn_pair_idx, fruit_F_conn_pair_idx, ...
                                               conn_block_base_pos_xy)
-        global fruit_signal_manager_global;
+
         
         % --- 1. 提取果柄参数 (仅线性) ---
         kp_y = fruit_params.k_pedicel_y;
@@ -3238,11 +3245,8 @@ function simulation_results = Build_Extended_MDOF_model(sim_params)
                                       branch_level, branch_indices, ...
                                       model_build_params_struct, layout_params_struct, ...
                                       base_pos_xy, current_branch_subsystem_full_path_tentative_in)
-        % 声明使用全局变量
-        global excitation_targets_global;
-        global current_y_level_global; 
-        global fruit_signal_manager_global;
-    
+        
+        
         % *** 获取初始条件映射表 ***
         ic_map = containers.Map(); % 默认空表
         if isfield(model_build_params_struct, 'initial_conditions')

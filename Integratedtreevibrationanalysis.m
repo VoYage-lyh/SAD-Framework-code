@@ -389,7 +389,6 @@ function runSimulation(sim_params)
     end
     
     % 2. 直接调用仿真函数 (核心步骤)
-    % 不再污染 Base Workspace，实现完全闭环
     
     fprintf('  正在启动模型构建与仿真函数 (Build_Extended_MDOF_model)...\n\n');
     
@@ -399,7 +398,7 @@ function runSimulation(sim_params)
             error('MATLAB:FileNotFound', ...
                 '未找到 "Build_Extended_MDOF_model.m" 函数文件，无法自动运行。');
         end
-        
+        exportSimParamsToWorkspace(sim_params);
         % === 自动执行函数 ===
         % 传入 sim_params，返回 simulation_results (如果需要可以捕获)
         Build_Extended_MDOF_model(sim_params);

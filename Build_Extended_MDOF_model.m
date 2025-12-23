@@ -13,8 +13,6 @@ function simulation_results = Build_Extended_MDOF_model(sim_params)
     %% --- 脚本初始化 ---
     % 关闭所有已打开的图形窗口，防止干扰
     close all;
-    % 清除命令行窗口的显示内容
-    clc;
     
     global excitation_targets_global; 
     global fruit_signal_manager_global; 
@@ -78,7 +76,7 @@ function simulation_results = Build_Extended_MDOF_model(sim_params)
     workFolder = sim_params.workFolder;
     
     % 指定文件夹路径
-    if use_gui_params && exist('workFolder', 'var') && ~isempty(workFolder)
+    if exist('workFolder', 'var') && ~isempty(workFolder)
         folderPath = workFolder;
     else
         folderPath = pwd;  % 使用当前目录
@@ -325,9 +323,19 @@ function simulation_results = Build_Extended_MDOF_model(sim_params)
     disp(newline);
     
     % --- B. 预定义所有可能分枝的参数 (Parameter Pre-definition Library) ---
-    predefined_params = struct();
-    disp('初始化空的预定义参数库 (predefined_params)。');
-    
+    if isfield(sim_params, 'predefined_params')
+        predefined_params = sim_params.predefined_params;
+    else
+        error('Build_Extended:MissingParams', 'sim_params 中缺少 predefined_params，无法继续。');
+    end
+
+    if isfield(sim_params, 'default_fruit_params')
+        default_fruit_params = sim_params.default_fruit_params;
+    else
+        warning('sim_params 中缺少 default_fruit_params，使用空结构体。');
+        default_fruit_params = struct();
+    end
+    fprintf('检查预定义参数库状态: 包含 %d 个字段。\n', length(fieldnames(predefined_params)));
     disp(default_fruit_params);
     disp(newline);
     
@@ -476,7 +484,6 @@ function simulation_results = Build_Extended_MDOF_model(sim_params)
     disp(newline);    
     %% === 3.5 静态分析：计算重力引起的初始位移 ===
     % 本部分根据系统拓扑和参数，建立静态有限元模型，求解在重力作用下的平衡位移。
-    % 这些位移将作为Simulink模型中各质量点位移积分器的初始条件。
     disp(newline);
     disp('=== 3.5 开始进行静态分析以计算重力初始位移 ===');
     
@@ -485,9 +492,68 @@ function simulation_results = Build_Extended_MDOF_model(sim_params)
     if gravity_g ~= 0
         disp('重力不为零，开始构建并求解静态平衡方程 K * U = F...');
     
+        % 准备静态分析所需的参数结构体
+        model_build_params = struct();
+        model_build_params.config = config;
+        model_build_params.gravity_g = gravity_g;
+        model_build_params.parameters = struct();
+        
+        % 1. 获取源数据
+        if isfield(sim_params, 'predefined_params')
+            source_params = sim_params.predefined_params;
+        else
+            error('Build_Extended:MissingPredefined', 'sim_params 中严重缺少 predefined_params。');
+        end
+        
+        % 2. 初始化 Cell 数组
+        model_build_params.parameters.primary = {};
+        model_build_params.parameters.secondary = {};
+        model_build_params.parameters.tertiary = {};
+        
+        % 3. 智能解析 Px_Sy_Tz
+        param_names = fieldnames(source_params);
+        for k = 1:length(param_names)
+            p_name = param_names{k};
+            p_val = source_params.(p_name);
+            
+            % 解析三级 (P1_S1_T1)
+            tokens_t = sscanf(p_name, 'P%d_S%d_T%d');
+            if ~isempty(tokens_t) && length(tokens_t) == 3
+                p = tokens_t(1); s = tokens_t(2); t = tokens_t(3);
+                model_build_params.parameters.tertiary{p}{s}{t} = p_val;
+                continue;
+            end
+            
+            % 解析二级 (P1_S1)
+            tokens_s = sscanf(p_name, 'P%d_S%d');
+            if ~isempty(tokens_s) && length(tokens_s) == 2
+                p = tokens_s(1); s = tokens_s(2);
+                model_build_params.parameters.secondary{p}{s} = p_val;
+                continue;
+            end
+            
+            % 解析一级 (P1)
+            tokens_p = sscanf(p_name, 'P%d');
+            if ~isempty(tokens_p) && length(tokens_p) == 1
+                p = tokens_p(1);
+                model_build_params.parameters.primary{p} = p_val;
+                continue;
+            end
+        end
+        
+        fprintf('  [Static Analysis] 参数已重组为 Cell 数组 (Pri=%d个)\n', length(model_build_params.parameters.primary));
+        
+        % 4. 显式注入 trunk 参数 (保持不变)
+        if exist('trunk_params', 'var')
+            model_build_params.parameters.trunk = trunk_params;
+        elseif exist('sim_params', 'var') && isfield(sim_params, 'trunk')
+            model_build_params.parameters.trunk = sim_params.trunk;
+        else
+            error('Build_Extended:MissingTrunk', '无法找到 trunk 参数，静态分析无法继续。');
+        end
+        
         % --- 步骤 1: 建立自由度(DOF)映射表 ---
         disp('  步骤 1/4: 正在建立系统自由度(DOF)映射...');
-        % 调用辅助函数，该函数应定义在脚本末尾
         dof_map = map_dofs_recursively_static(model_build_params.parameters);
         num_masses = length(dof_map);
         num_dofs = num_masses * 2;
@@ -501,7 +567,7 @@ function simulation_results = Build_Extended_MDOF_model(sim_params)
         for i = 1:num_masses
             mass_val = dof_map{i}{2}; % 从DOF映射中获取质量
             y_dof_idx = 2*i - 1;     % Y方向自由度的索引
-            F(y_dof_idx) = -mass_val * gravity_g; % 假设Y为竖直方向
+            F(y_dof_idx) = -mass_val * gravity_g; 
         end
         
         % 调用辅助函数构建全局刚度矩阵 K
@@ -511,9 +577,9 @@ function simulation_results = Build_Extended_MDOF_model(sim_params)
         % --- 步骤 3: 求解静态位移 ---
         disp('  步骤 3/4: 正在求解线性方程组 K * U = F...');
         if rcond(full(K)) < eps
-            warning('静态分析警告：全局刚度矩阵 K 是奇异的或接近奇异的。这可能意味着系统结构不稳定（存在自由浮动的部件）。求解结果可能不准确或出错。');
-            U_static = pinv(full(K)) * F; % 使用伪逆尝试求解
-            disp('  由于矩阵奇异，已使用伪逆(pinv)进行求解。');
+            warning('静态分析警告：全局刚度矩阵 K 是奇异的。求解可能不准确。');
+            U_static = pinv(full(K)) * F; 
+            disp('  已使用伪逆(pinv)进行求解。');
         else
             U_static = K \ F;
             disp('  求解完成。');
@@ -534,8 +600,14 @@ function simulation_results = Build_Extended_MDOF_model(sim_params)
         disp('  初始条件映射表构建完成。');
     
     else
-        disp('重力加速度为零，跳过静态分析。所有初始条件将默认为0。');
+        disp('重力加速度为零，跳过静态分析。');
     end
+    
+    disp('=== 3.5 静态分析完成 ===');
+    disp(newline);
+    
+    % 更新 model_build_params
+    model_build_params.initial_conditions = initial_conditions_map;
     
     disp('=== 3.5 静态分析完成 ===');
     disp(newline);
@@ -544,7 +616,7 @@ function simulation_results = Build_Extended_MDOF_model(sim_params)
     model_build_params.initial_conditions = initial_conditions_map;
     disp('已将计算出的 initial_conditions_map 添加到 model_build_params 结构体中。');
     
-    %% === 4. (新增功能) 绘制果树拓扑结构 ===
+    %% === 4. 绘制果树拓扑结构 ===
     disp(newline);
     disp('=== 9. 开始绘制果树拓扑结构 ===');
     
@@ -613,7 +685,6 @@ function simulation_results = Build_Extended_MDOF_model(sim_params)
     layout_params.general_inport_height = 20;  % 通用或命名输入端口的高度
     
     disp('Simulink模块布局参数 (layout_params) 已定义。');
-    disp(layout_params);
     disp(newline);
     
     % --- 全局变量初始化 (用于在递归函数 build_branch_recursively 间传递信息) ---
@@ -1195,7 +1266,34 @@ function simulation_results = Build_Extended_MDOF_model(sim_params)
         for i_sim = 1:num_simulations
             fprintf('  配置第 %d/%d 个仿真输入对象 (对应激励目标 %d: %s)...\n', ...
                     i_sim, num_simulations, i_sim, excitation_targets{i_sim}.name);
-    
+            
+            % 1. 传递激励类型选择器 (解决 'excitation_type_selector_value' 丢失问题)
+            simulation_inputs(i_sim) = simulation_inputs(i_sim).setVariable('excitation_type_selector_value', excitation_type_selector_value);
+            
+            % 2. 传递脉冲源参数 (解决 'pulse_amplitude_y/z' 丢失问题)
+            simulation_inputs(i_sim) = simulation_inputs(i_sim).setVariable('pulse_amplitude_y', pulse_amplitude_y);
+            simulation_inputs(i_sim) = simulation_inputs(i_sim).setVariable('pulse_amplitude_z', pulse_amplitude_z);
+            
+            % 3. 传递正弦/脉冲的具体参数 (防止 Worker 找不到这些从 sim_params 解包出来的变量)
+            simulation_inputs(i_sim) = simulation_inputs(i_sim).setVariable('F_excite_y_amplitude', F_excite_y_amplitude);
+            simulation_inputs(i_sim) = simulation_inputs(i_sim).setVariable('F_excite_z_amplitude', F_excite_z_amplitude);
+            simulation_inputs(i_sim) = simulation_inputs(i_sim).setVariable('excitation_frequency_hz', excitation_frequency_hz);
+            simulation_inputs(i_sim) = simulation_inputs(i_sim).setVariable('excitation_phase_y_rad', excitation_phase_y_rad);
+            simulation_inputs(i_sim) = simulation_inputs(i_sim).setVariable('excitation_phase_z_rad', excitation_phase_z_rad);
+            
+            simulation_inputs(i_sim) = simulation_inputs(i_sim).setVariable('impulse_force_gain_y', impulse_force_gain_y);
+            simulation_inputs(i_sim) = simulation_inputs(i_sim).setVariable('impulse_force_gain_z', impulse_force_gain_z);
+            simulation_inputs(i_sim) = simulation_inputs(i_sim).setVariable('pulse_period_s', pulse_period_s);
+            simulation_inputs(i_sim) = simulation_inputs(i_sim).setVariable('pulse_width_percent', pulse_width_percent);
+            simulation_inputs(i_sim) = simulation_inputs(i_sim).setVariable('pulse_phase_delay_y_s', pulse_phase_delay_y_s);
+            simulation_inputs(i_sim) = simulation_inputs(i_sim).setVariable('pulse_phase_delay_z_s', pulse_phase_delay_z_s);
+            
+            simulation_inputs(i_sim) = simulation_inputs(i_sim).setVariable('excitation_start_time', excitation_start_time);
+            simulation_inputs(i_sim) = simulation_inputs(i_sim).setVariable('excitation_end_time', excitation_end_time);
+            
+            % 4. 传递重力参数 (保险起见)
+            simulation_inputs(i_sim) = simulation_inputs(i_sim).setVariable('gravity_g', gravity_g);
+
             % --- 设置本次仿真要激励的目标 ---
             % 通过 setVariable 方法，为当前 SimulationInput 对象设置模型工作区 (Model Workspace) 中的变量。
             % 'excitation_target_idx_base' 是在Simulink模型顶层由一个Constant模块引用的变量名。
@@ -1218,15 +1316,25 @@ function simulation_results = Build_Extended_MDOF_model(sim_params)
             % end
             % 当前脚本中，激励幅值和频率等参数是全局固定的，在第2部分已定义，并由Simulink模块直接引用。
     
-            % --- 设置通用的模型仿真参数 ---
-            % 这些参数通常对于所有批处理仿真都是相同的。
-            simulation_inputs(i_sim) = simulation_inputs(i_sim).setModelParameter('StopTime', num2str(sim_stop_time)); % 仿真停止时间
-    %         simulation_inputs(i_sim) = simulation_inputs(i_sim).setModelParameter('SolverType','Fixed-step');      % 求解器类型：定步长
-    %         simulation_inputs(i_sim) = simulation_inputs(i_sim).setModelParameter('FixedStep', num2str(sim_fixed_step));   % 定步长大小
+            % --- 设置通用的模型仿真参数 (修复版) ---
+            simulation_inputs(i_sim) = simulation_inputs(i_sim).setModelParameter('StopTime', num2str(sim_stop_time));
+            
+            % 为 ode15s (Stiff) 求解器，解决 "hmin" 不收敛的关键
             simulation_inputs(i_sim) = simulation_inputs(i_sim).setModelParameter('SolverType', 'Variable-step');
-            simulation_inputs(i_sim) = simulation_inputs(i_sim).setModelParameter('Solver', 'ode23t'); % ode15s, ode23t为变步长，ode45为定步长
-            simulation_inputs(i_sim) = simulation_inputs(i_sim).setModelParameter('RelTol', '1e-4'); % 默认是1e-3
-            simulation_inputs(i_sim) = simulation_inputs(i_sim).setModelParameter('AbsTol', '1e-5'); % 默认是auto
+            simulation_inputs(i_sim) = simulation_inputs(i_sim).setModelParameter('Solver', 'ode15s'); 
+            
+            % 放宽相对容差至 1e-3 (标准工程精度)，绝对容差至 1e-6
+            % 之前的 1e-4/1e-5 对于非线性接触/断裂模型过于严苛，容易导致计算卡死
+            simulation_inputs(i_sim) = simulation_inputs(i_sim).setModelParameter('RelTol', '1e-3'); 
+            simulation_inputs(i_sim) = simulation_inputs(i_sim).setModelParameter('AbsTol', '1e-6');
+            
+            % 限制最大步长，防止求解器步子迈太大漏掉高频振动
+            % 建议设为 0.001 (1kHz 采样) 或更小
+            simulation_inputs(i_sim) = simulation_inputs(i_sim).setModelParameter('MaxStep', '0.001'); 
+            
+            % 启用求解器复位方法的鲁棒性设置
+            simulation_inputs(i_sim) = simulation_inputs(i_sim).setModelParameter('SolverResetMethod', 'Robust');
+
             % --- 设置数据保存和输出参数 ---
             simulation_inputs(i_sim) = simulation_inputs(i_sim).setModelParameter('SaveFormat', 'Dataset'); % 推荐的数据保存格式 (Dataset)
                                                                                                           % Dataset格式便于后续数据处理和访问。
@@ -2731,12 +2839,16 @@ function simulation_results = Build_Extended_MDOF_model(sim_params)
         add_line(parent_model_path, [dvy_sum_name, '/1'], [cy_gain_name, '/1']);
         
         % 5. 非线性刚度 (Duffing: k3_y * dy^3)
+        % 使用 Product 模块计算立方 (dy * dy * dy)，替代错误的 Math Function 参数
         dy_pow3_name = [conn_block_name_base, '_dy_pow3'];
-        add_block('simulink/Math Operations/Math Function', [parent_model_path, '/', dy_pow3_name], ...
-                  'Function', 'pow', 'Operand', '3', ...
-                  'Position', [cb_x + sum_w + h_spacing, cb_y_start_y_dir + 55, ... % 偏移位置
+        add_block('simulink/Math Operations/Product', [parent_model_path, '/', dy_pow3_name], ...
+                  'Inputs', '3', ... % 3个输入相乘
+                  'Position', [cb_x + sum_w + h_spacing, cb_y_start_y_dir + 55, ... 
                                cb_x + sum_w + h_spacing + gain_w, cb_y_start_y_dir + 75]);
+        % 将 dy 连接到所有三个输入端口
         add_line(parent_model_path, [dy_sum_name, '/1'], [dy_pow3_name, '/1']);
+        add_line(parent_model_path, [dy_sum_name, '/1'], [dy_pow3_name, '/2']);
+        add_line(parent_model_path, [dy_sum_name, '/1'], [dy_pow3_name, '/3']);
         
         k3y_gain_name = [conn_block_name_base, '_k3y_gain'];
         add_block('simulink/Commonly Used Blocks/Gain', [parent_model_path, '/', k3y_gain_name], ...
@@ -2872,12 +2984,16 @@ function simulation_results = Build_Extended_MDOF_model(sim_params)
         add_line(parent_model_path, [dvz_sum_name, '/1'], [cz_gain_name, '/1']);
     
         % 5. 非线性刚度 (Duffing: k3_z * dz^3)
+        % [修复] 使用 Product 模块计算立方 (dz * dz * dz)
         dz_pow3_name = [conn_block_name_base, '_dz_pow3'];
-        add_block('simulink/Math Operations/Math Function', [parent_model_path, '/', dz_pow3_name], ...
-                  'Function', 'pow', 'Operand', '3', ...
+        add_block('simulink/Math Operations/Product', [parent_model_path, '/', dz_pow3_name], ...
+                  'Inputs', '3', ...
                   'Position', [cb_x + sum_w + h_spacing, cb_y_start_z_dir + 55, ...
                                cb_x + sum_w + h_spacing + gain_w, cb_y_start_z_dir + 75]);
+        % 将 dz 连接到所有三个输入端口
         add_line(parent_model_path, [dz_sum_name, '/1'], [dz_pow3_name, '/1']);
+        add_line(parent_model_path, [dz_sum_name, '/1'], [dz_pow3_name, '/2']);
+        add_line(parent_model_path, [dz_sum_name, '/1'], [dz_pow3_name, '/3']);
         
         k3z_gain_name = [conn_block_name_base, '_k3z_gain'];
         add_block('simulink/Commonly Used Blocks/Gain', [parent_model_path, '/', k3z_gain_name], ...
@@ -3288,29 +3404,33 @@ function simulation_results = Build_Extended_MDOF_model(sim_params)
             path_id_str_for_names = 'Trunk';
             current_branch_params = model_build_params_struct.parameters.trunk;
         else
-            % 从 branch_indices 重新构建路径前缀
+            % 从 branch_indices 重新构建路径前缀 (保持不变)
             prefix_parts = {};
-            if length(branch_indices) >= 1
-                prefix_parts{end+1} = ['P' num2str(branch_indices(1))];
-            end
-            if length(branch_indices) >= 2
-                prefix_parts{end+1} = ['S' num2str(branch_indices(2))];
-            end
-            if length(branch_indices) == 3
-                prefix_parts{end+1} = ['T' num2str(branch_indices(3))];
-            end
+            if length(branch_indices) >= 1, prefix_parts{end+1} = ['P' num2str(branch_indices(1))]; end
+            if length(branch_indices) >= 2, prefix_parts{end+1} = ['S' num2str(branch_indices(2))]; end
+            if length(branch_indices) == 3, prefix_parts{end+1} = ['T' num2str(branch_indices(3))]; end
             path_id_str_for_names = strjoin(prefix_parts, '_');
             
-            % 提取参数 (这部分逻辑可以简化)
-            temp_ptr = model_build_params_struct.parameters.primary{branch_indices(1)};
-            if length(branch_indices) >= 2
-                temp_ptr = temp_ptr.secondary_branches{branch_indices(2)};
+            % [修复] 适配 Step 3.5 生成的扁平化参数结构 (直接从对应的 Cell 数组读取)
+            % 不再需要逐层深入 secondary_branches
+            try
+                if length(branch_indices) == 1
+                    % Level 1: Primary
+                    current_branch_params = model_build_params_struct.parameters.primary{branch_indices(1)};
+                elseif length(branch_indices) == 2
+                    % Level 2: Secondary {p}{s}
+                    current_branch_params = model_build_params_struct.parameters.secondary{branch_indices(1)}{branch_indices(2)};
+                elseif length(branch_indices) == 3
+                    % Level 3: Tertiary {p}{s}{t}
+                    current_branch_params = model_build_params_struct.parameters.tertiary{branch_indices(1)}{branch_indices(2)}{branch_indices(3)};
+                else
+                    error('不支持的分枝层级');
+                end
+            catch e
+                error('Build_Extended:ParamAccess', '无法获取分枝 %s 的参数。索引可能越界: %s', ...
+                      path_id_str_for_names, e.message);
             end
-            if length(branch_indices) == 3
-                temp_ptr = temp_ptr.tertiary_branches{branch_indices(3)};
-            end
-            current_branch_params = temp_ptr;
-        end 
+        end
     
         if ~valid_params_found || isempty(fieldnames(current_branch_params)) || ~isfield(current_branch_params, 'root')
             fprintf('警告 build_branch_recursively: 跳过分枝构建 - 层级: %d, 索引: %s (ID: %s) - 原因: 参数缺失或无效。\n', ...

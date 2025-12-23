@@ -1,4 +1,4 @@
-%% 果树振动分析与仿真 - 统一集成脚本 v2.0
+%% 果树振动分析与仿真 - 统一集成脚本
 % =========================================================================
 % 正确的工作流程：
 %   第一步：GUI预配置 -> 拓扑、几何、质量、仿真参数（不含刚度阻尼）
@@ -17,7 +17,6 @@ fprintf('║    果树振动分析与仿真集成系统                         
 fprintf('║    (正确工作流程版本)                                  ║\n');
 fprintf('╚═══════════════════════════════════════════════════════╝\n\n');
 
-%% ===================================================================
 %% 第一步：GUI预配置
 fprintf('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
 fprintf('第一步：打开预配置界面\n');
@@ -39,7 +38,6 @@ fname_config = sprintf('%s_PreConfig.mat', preConfig.basic.projectName);
 save(fname_config, 'preConfig');
 fprintf('  预配置已保存到: %s\n', fname_config);
 
-%% ===================================================================
 %% 第二步：参数识别
 fprintf('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
 fprintf('第二步：参数识别\n');
@@ -70,7 +68,6 @@ if isempty(identifiedParams)
     return;
 end
 
-%% ===================================================================
 %% 第三步：生成仿真参数
 fprintf('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
 fprintf('第三步：生成仿真参数\n');
@@ -83,7 +80,6 @@ fname_sim = sprintf('%s_SimParams.mat', preConfig.basic.projectName);
 save(fname_sim, 'sim_params', 'preConfig', 'identifiedParams');
 fprintf('  完整仿真参数已保存到: simulation_params_complete.mat\n\n');
 
-%% ===================================================================
 %% 第四步：运行仿真
 fprintf('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
 fprintf('第四步：运行仿真\n');
@@ -107,7 +103,6 @@ end
 
 fprintf('  [√] 第四步执行完毕。\n\n');
 
-%% ===================================================================
 %% 完成
 fprintf('╔═══════════════════════════════════════════════════════╗\n');
 fprintf('║    流程完成!                                          ║\n');
@@ -482,7 +477,7 @@ function exportSimParamsToWorkspace(params)
     if ~isfield(params, 'parallel_max_workers')
         error('ExportParams:MissingData', '缺少并行Worker数设置(parallel_max_workers)');
     end
-    assignin('base', 'parallel_execution_max_workers', params.parallel_max_workers);
+    assignin('base', 'parallel_max_workers', params.parallel_max_workers);
     
     % ========== 工作目录 ==========
     if isfield(params, 'workFolder') && ~isempty(params.workFolder)

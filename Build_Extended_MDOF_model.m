@@ -344,7 +344,7 @@ function simulation_results = Build_Extended_MDOF_model(sim_params)
         if isfield(t_p.tip, 'c2_x_conn'), c2x=t_p.tip.c2_x_conn; end
         if isfield(t_p.tip, 'k3_z_conn'), k3z=t_p.tip.k3_z_conn; end
         if isfield(t_p.tip, 'c2_z_conn'), c2z=t_p.tip.c2_z_conn; end
-        fprintf('  [Tip]  m=%.4e | Kx=%.4e Cx=%.4e K3x=%.4e C2y=%.4e | Kz=%.4e Cz=%.4e K3z=%.4e C2z=%.4e\n', ...
+        fprintf('  [Tip]  m=%.4e | Kx=%.4e Cx=%.4e K3x=%.4e C2x=%.4e | Kz=%.4e Cz=%.4e K3z=%.4e C2z=%.4e\n', ...
             t_p.tip.m, t_p.tip.k_x_conn, t_p.tip.c_x_conn, k3x, c2x, t_p.tip.k_z_conn, t_p.tip.c_z_conn, k3z, c2z);
     else
         fprintf(2, '  [ERROR] 无法找到 Trunk 参数结构体!\n');

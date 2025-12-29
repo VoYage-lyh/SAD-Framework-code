@@ -3443,7 +3443,7 @@ function simulation_results = Build_Extended_MDOF_model(sim_params)
     
         if branch_level == 0
             path_id_str_for_names = 'Trunk';
-            current_branch_params = model_build_params_struct.parameters.trunk;
+            current_branch_params = model_build_params_struct.parameters;
         else
             % 从 branch_indices 重新构建路径前缀 (保持不变)
             prefix_parts = {};
@@ -4325,7 +4325,7 @@ function simulation_results = Build_Extended_MDOF_model(sim_params)
         end
     
         % 从主干开始
-        traverse(parameters.trunk, 'Trunk');
+        traverse(parameters, 'Trunk');
         
         % 遍历所有一级分枝
         for p_idx = 1:length(parameters.primary)
@@ -5464,8 +5464,8 @@ function simulation_results = Build_Extended_MDOF_model(sim_params)
             % 1. Root -> Parent (Base or Previous Tip)
             k3x = get_p(params.root, 'k3_x_conn_to_base'); if isempty(parent_id), k3x = get_p(params.root, 'k3_x_conn_to_base'); else, k3x = get_p(params.root, 'k3_x_conn'); end
             k3z = get_p(params.root, 'k3_z_conn_to_base'); if isempty(parent_id), k3z = get_p(params.root, 'k3_z_conn_to_base'); else, k3z = get_p(params.root, 'k3_z_conn'); end
-            kx_lin = isempty(parent_id) * params.root.k_x_conn_to_base + ~isempty(parent_id) * params.root.k_x_conn;
-            kz_lin = isempty(parent_id) * params.root.k_z_conn_to_base + ~isempty(parent_id) * params.root.k_z_conn;
+            kx_lin = params.root.k_x_conn;
+            kz_lin = params.root.k_z_conn;
             
             add_element_contribution(root_id, parent_id, kx_lin, k3x, kz_lin, k3z);
             
@@ -5505,7 +5505,7 @@ function simulation_results = Build_Extended_MDOF_model(sim_params)
         end
         
         % 启动遍历
-        traverse_params(model_build_params.parameters.trunk, 'Trunk', []);
+        traverse_params(model_build_params.parameters, 'Trunk', []);
         trunk_tip_id = matlab.lang.makeValidName('Trunk_tip_Mass');
         for p=1:length(model_build_params.parameters.primary)
             traverse_params(model_build_params.parameters.primary{p}, ['P', num2str(p)], trunk_tip_id);

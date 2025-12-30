@@ -5010,75 +5010,77 @@ end
 % 骨架曲线偏离度计算
 function [deviation, freq_amp_pairs] = computeBackboneDeviation(segments, linear_params, pos_idx, fs)
     % 计算骨架曲线偏离度
-    %
     % 根据V3手稿:
     % "骨架曲线偏离度(Backbone Curve Deviation)定义为实测共振频率相对于线性预测频率的相对偏移"
     
     deviation = 0;
-    freq_amp_pairs = struct('amplitudes', [], 'frequencies', []);
+    % 初始化结构体
+    freq_amp_pairs = struct('amplitudes', [], 'frequencies', [], 'forces', []);
     
-    % 获取线性基准频率
+    % 获取线性基准频率（用于计算偏离度）
     if isfield(linear_params, 'natural_freqs_x') && ~isempty(linear_params.natural_freqs_x)
         f0_linear = linear_params.natural_freqs_x(1);
     elseif isfield(linear_params, 'natural_freqs_z') && ~isempty(linear_params.natural_freqs_z)
         f0_linear = linear_params.natural_freqs_z(1);
     else
-        f0_linear = 10;  % 默认值
+        f0_linear = 10;
     end
     
-    if isempty(segments)
-        return;
-    end
+    if isempty(segments), return; end
     
-    % 从各段提取幅值-频率数据对
     amplitudes = [];
     frequencies = [];
+    forces = [];
     
     for k = 1:length(segments)
         seg = segments(k);
-        if ~isfield(seg, 'signal_data') || isempty(seg.signal_data)
-            continue;
-        end
+        if ~isfield(seg, 'signal_data') || isempty(seg.signal_data), continue; end
         
         signal = seg.signal_data;
         n = length(signal);
+        if n < 64, continue; end
         
-        if n < 64
-            continue;
-        end
-        
-        % 计算幅值
+        % 1. 提取响应幅值 (加速度 g)
         amp = max(abs(signal));
         
-        % 估计主频 (使用峰值频率)
+        % 2. 提取主频
         [psd, f] = pwelch(signal, [], [], [], fs);
         [~, idx] = max(psd);
         freq_peak = f(idx);
         
-        amplitudes(end+1) = amp;
-        frequencies(end+1) = freq_peak;
+        % 3. 提取激励力幅值 (N)
+        force_amp = 0;
+        if isfield(seg, 'force_data_segment') && ~isempty(seg.force_data_segment)
+            force_amp = max(abs(seg.force_data_segment));
+        else
+            % 如果没有力数据，该点可能无法用于识别C2，但暂且保留
+            force_amp = NaN; 
+        end
+        
+        % 仅当数据有效时添加
+        if ~isnan(force_amp) && force_amp > 0
+            amplitudes(end+1) = amp;
+            frequencies(end+1) = freq_peak;
+            forces(end+1) = force_amp;
+        end
     end
     
-    if isempty(amplitudes)
-        return;
-    end
+    if isempty(amplitudes), return; end
     
     freq_amp_pairs.amplitudes = amplitudes;
     freq_amp_pairs.frequencies = frequencies;
+    freq_amp_pairs.forces = forces; % 保存力数据
     
-    % 计算频率偏移的归一化值
+    % 计算骨架曲线偏离度 (保持原有逻辑)
     freq_deviation = (frequencies - f0_linear) / f0_linear;
-    
-    % 骨架曲线偏离度: 使用幅值加权的频率偏移
     weights = amplitudes / sum(amplitudes);
     deviation = sum(weights .* abs(freq_deviation));
     
-    % 判断硬化/软化 (正值表示频率升高->硬化, 负值表示频率降低->软化)
     mean_deviation = sum(weights .* freq_deviation);
     if mean_deviation >= 0
-        deviation = abs(deviation);  % 硬化
+        deviation = abs(deviation);
     else
-        deviation = -abs(deviation);  % 软化 (保留符号用于后续判断)
+        deviation = -abs(deviation);
     end
 end
 
@@ -5349,10 +5351,19 @@ function nonlinear_params = SAD_Stage3_NonlinearParameterIdentification(nl_segme
         
         % 计算等效质量 (基于线性刚度和基频)
         m_eq = k_lin / omega0^2;
+
+        % [新增] 获取力幅值数据
+        if isfield(freq_amp, 'forces') && ~isempty(freq_amp.forces)
+            forces_meas = freq_amp.forces;
+        else
+            % 如果上一步没提取到力，给一个默认值防止报错，但这样无法准确识别c2
+            forces_meas = ones(size(freq_amp.amplitudes)); 
+            fprintf('      [警告] 缺少力幅值数据，阻尼非线性识别可能不准确。\n');
+        end
         
         % 谐波平衡法优化求解 k3 和 c2
         [k3, c2, fit_quality] = harmonicBalanceOptimization(...
-            freq_amp.amplitudes, freq_amp.frequencies, ...
+            freq_amp.amplitudes, freq_amp.frequencies, forces_meas, ... 
             k_lin, c_lin, m_eq, omega0);
         
         nonlinear_params.k3_coeffs(p) = k3;
@@ -5381,118 +5392,104 @@ end
 % 2. 基于数据的 k3 智能初始化，替代硬编码
 % =========================================================================
 function [k3_opt, c2_opt, fit_quality] = harmonicBalanceOptimization(...
-    amplitudes_g, frequencies, k_lin, c_lin, m_eq, omega0)
+    amplitudes_g, frequencies, forces_meas, k_lin, c_lin, m_eq, omega0)
+    % [修改版] 基于谐波平衡法(HBM)的参数优化，包含力平衡方程
     
-    % 1. [单位转换] 将加速度幅值(g)转换为位移幅值(m)
-    % A_disp = (A_g * 9.80665) / omega^2
-    % 注意：这里使用测量的频率进行转换是近似的，但在共振点附近是合理的
+    % 1. 单位转换: 加速度(g) -> 位移(m)
+    % A_disp = A_g * 9.8 / w^2
     omega_exp = 2 * pi * frequencies;
     A_disp = (amplitudes_g * 9.80665) ./ (omega_exp.^2);
     
-    % 调试输出，确认数量级
-    if length(A_disp) > 0
-        fprintf('        [数据检查] 加速度幅值: %.2f g -> 位移幅值: %.2f mm\n', ...
-            mean(amplitudes_g), mean(A_disp)*1000);
-    end
-
-    % 2. [智能初始化] 根据 Duffing 频率公式反推 k3 初值
-    % 公式: (w/w0)^2 = 1 + 0.75 * (k3/k_lin) * A^2
-    % => k3 = ( (w/w0)^2 - 1 ) * k_lin / (0.75 * A^2)
-    
-    valid_pts = 0;
+    % 2. 初始值估计
+    % k3 估计 (基于骨架曲线频率漂移)
+    valid_k3_pts = 0;
     k3_est_sum = 0;
-    
     for i = 1:length(frequencies)
         w_ratio_sq = (omega_exp(i) / omega0)^2;
-        if abs(w_ratio_sq - 1) > 0.01 % 只使用频率偏移明显的数据点
-            k3_val = (w_ratio_sq - 1) * k_lin / (0.75 * A_disp(i)^2);
-            k3_est_sum = k3_est_sum + k3_val;
-            valid_pts = valid_pts + 1;
+        if abs(w_ratio_sq - 1) > 0.02 && A_disp(i) > 1e-6
+            % (w/w0)^2 = 1 + 0.75 * k3/k * A^2
+            val = (w_ratio_sq - 1) * k_lin / (0.75 * A_disp(i)^2);
+            k3_est_sum = k3_est_sum + val;
+            valid_k3_pts = valid_k3_pts + 1;
         end
     end
+    k3_init = (valid_k3_pts > 0) * (k3_est_sum / max(1, valid_k3_pts));
     
-    if valid_pts > 0
-        k3_init = k3_est_sum / valid_pts;
-    else
-        % 如果没有明显频率偏移，默认为0 (线性)
-        k3_init = 0;
-    end
-    
-    % 阻尼初值
-    c2_init = 0; % 从0开始
+    % c2 估计 (简单给一个小的非零初值)
+    c2_init = c_lin * 0.1; 
     
     x0 = [k3_init, c2_init];
     
-    fprintf('        [初始化] k3_init = %.2e, k_lin = %.2e\n', k3_init, k_lin);
-    
-    % 3. 设置合理的边界
-    % k3 的范围放宽，但防止天文数字
-    % 注意：如果 k3_init 是负数，lb 应该是更小的负数
+    % 3. 设置边界
+    % K3: 允许正负 (硬/软)
     if k3_init < 0
-        lb = [k3_init * 10, -100]; % 软化
-        ub = [abs(k3_init), 100];   % 允许稍微变正，用于搜索
+        lb_k3 = k3_init * 10; ub_k3 = abs(k3_init);
     else
-        lb = [-abs(k3_init), -100];
-        ub = [max(1e4, k3_init * 10), 100];
+        lb_k3 = -abs(k3_init); ub_k3 = max(1e6, k3_init * 10);
     end
     
-    % 4. 目标函数 (传入位移 A_disp)
-    objective = @(x) computeHBMObjective(x, A_disp, omega_exp, k_lin, c_lin, m_eq, omega0);
+    % C2: 非线性阻尼通常消耗能量，设为宽范围
+    % 注意：如果 c2 < 0 可能代表自激振动，通常物理系统中 c_eff > 0
+    lb = [min(-1e15, lb_k3), -1e5]; 
+    ub = [max(1e15, ub_k3),  1e5];
     
-    % 优化选项
+    % 4. 优化配置
     options = optimoptions('fmincon', 'Display', 'off', ...
-        'MaxIterations', 200, 'OptimalityTolerance', 1e-8, 'StepTolerance', 1e-8);
+        'MaxIterations', 400, 'OptimalityTolerance', 1e-8, ...
+        'StepTolerance', 1e-8, 'Algorithm', 'sqp'); % 使用SQP算法通常更稳健
+    
+    % 5. 定义目标函数
+    % 传入所有物理量：位移幅值、频率、测量的力、线性参数
+    objective = @(x) computeHBMObjective(x, A_disp, omega_exp, forces_meas, k_lin, c_lin, m_eq);
     
     try
         [x_opt, fval] = fmincon(objective, x0, [], [], [], [], lb, ub, [], options);
         k3_opt = x_opt(1);
         c2_opt = x_opt(2);
         
-        % 归一化拟合质量 (0-1)
-        fit_quality = max(0, 1 - fval); 
+        % 质量评分 (基于相对残差)
+        fit_quality = max(0, 1 - sqrt(fval)); 
     catch ME
         fprintf('        [优化失败] %s\n', ME.message);
         k3_opt = k3_init;
-        c2_opt = c2_init;
+        c2_opt = 0;
         fit_quality = 0;
     end
 end
 
-% =========================================================================
-% 1. 增加 sqrt 内的非负保护 (max(0, ...))
-% 2. 修正频率预测逻辑，避免软化过度导致的计算错误
-% =========================================================================
-function error = computeHBMObjective(x, A_disp, omega_exp_meas, k_lin, c_lin, m_eq, omega0)
+function error = computeHBMObjective(x, A_disp, omega, F_meas, k, c, m)
+    % [核心函数] 计算 HBM 力平衡误差
+    % 理论背景: Duffing + 非线性阻尼 的幅频响应方程
+    % F^2 = [ (k - m*w^2 + 0.75*k3*A^2)*A ]^2 + [ (c*w + coeff*c2*A*w)*A ]^2
     
     k3 = x(1);
-    c2 = x(2); % 暂时保留，虽然主要影响幅值而非频率，但在HBM完整方程中会耦合
+    c2 = x(2);
     
-    n = length(A_disp);
-    error = 0;
+    % 阻尼非线性系数 (假设为 8/3pi，对应平方阻尼的基波近似)
+    gamma = 8 / (3 * pi); 
     
-    for i = 1:n
-        A = A_disp(i); % 此时 A 已经是位移(m)
-        w_meas = omega_exp_meas(i);
-        
-        % 理论预测频率 (骨架曲线公式)
-        % w_pred^2 = w0^2 * (1 + 0.75 * k3/k_lin * A^2)
-        term = 1 + (0.75 * k3 * A^2) / k_lin;
-        
-        % [保护] 防止软化过度导致根号内为负
-        % 如果 term < 0，说明模型在该振幅下刚度已崩塌，给予巨大惩罚
-        if term > 0
-            w_pred = omega0 * sqrt(term);
-            % 计算相对平方误差
-            err_term = ((w_pred - w_meas) / w_meas)^2;
-        else
-            % 刚度崩塌惩罚: 距离0越远惩罚越大
-            err_term = 10 + abs(term) * 100; 
-        end
-        
-        error = error + err_term;
-    end
+    % 1. 计算弹性力项 (含惯性)
+    % F_elastic = (k - m*w^2 + 3/4*k3*A^2) * A
+    term_stiffness = k - m .* (omega.^2) + 0.75 * k3 .* (A_disp.^2);
+    F_elastic = term_stiffness .* A_disp;
     
-    error = error / n;
+    % 2. 计算阻尼力项
+    % F_damping = (c + gamma*c2*A) * w * A
+    % 这里的阻尼是等效粘性阻尼 C_eq = c + gamma*c2*A
+    term_damping = (c + gamma * c2 .* A_disp) .* omega;
+    F_damping = term_damping .* A_disp;
+    
+    % 3. 合成总理论力
+    F_calc = sqrt(F_elastic.^2 + F_damping.^2);
+    
+    % 4. 计算误差
+    % 使用归一化均方误差 (NMSE)
+    residuals = (F_calc - F_meas) ./ (F_meas + 1e-6); % 防止除零
+    error = mean(residuals.^2);
+    
+    % [正则化项]
+    % 防止参数过大导致过拟合，可加微小惩罚
+    error = error + 1e-12 * (k3^2 + c2^2);
 end
 
 
